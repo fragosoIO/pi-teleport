@@ -6,7 +6,7 @@ import type { PeerLink } from "./link.ts";
 import { assertSafeDestination, type OsName } from "./paths.ts";
 import { noteChunk, resumeCursor, type FileCursor } from "./resume.ts";
 import { applyTransfer, type StoredFile, type TransferState } from "./restore.ts";
-import { metaOf, type LocalFile } from "./snapshot.ts";
+import { fileLabel, metaOf, type LocalFile } from "./snapshot.ts";
 
 export interface SendPlan {
   transferId: string;
@@ -17,11 +17,22 @@ export interface SendPlan {
   files: LocalFile[];
 }
 
+export interface SendProgress {
+  phase: "sending" | "writing";
+  /** Bytes acknowledged, including bytes already on the receiver when resuming. */
+  done: number;
+  total: number;
+  fileIndex: number;
+  fileCount: number;
+  file?: string;
+}
+
 export interface SendOptions {
   resume?: boolean;
   chunkSize?: number;
   /** Test hook: close the socket after this many acked chunks. */
   dropAfterChunks?: number;
+  onProgress?: (event: SendProgress) => void;
 }
 
 export interface SendResult {
@@ -85,11 +96,26 @@ export async function sendPlan(link: PeerLink, plan: SendPlan, options: SendOpti
   let offset = Number(ready.offset ?? 0);
   let bytesSent = 0;
   let chunks = 0;
+  const total = plan.files.reduce((sum, file) => sum + file.size, 0);
+  // A resumed transfer reports the bytes the receiver already has, not zero.
+  const report = (phase: SendProgress["phase"]) => {
+    const current = fileIndex < plan.files.length ? plan.files[fileIndex] : undefined;
+    options.onProgress?.({
+      phase,
+      done: phase === "writing" ? total : bytesBefore(plan.files, fileIndex, offset),
+      total,
+      fileIndex: current ? fileIndex : Math.max(0, plan.files.length - 1),
+      fileCount: plan.files.length,
+      file: current ? fileLabel(current) : undefined,
+    });
+  };
+  report("sending");
   while (fileIndex < plan.files.length) {
     const file = plan.files[fileIndex];
     if (file.size === 0 || offset >= file.size) {
       fileIndex += 1;
       offset = 0;
+      report("sending");
       continue;
     }
     const length = Math.min(chunkSize, file.size - offset);
@@ -99,12 +125,6 @@ export async function sendPlan(link: PeerLink, plan: SendPlan, options: SendOpti
     if (ack.t !== "ack" || Number(ack.fileIndex) !== file.index) throw new Error("bad acknowledgement");
     bytesSent += data.length;
     chunks += 1;
-    if (options.dropAfterChunks && chunks >= options.dropAfterChunks) {
-      link.close();
-      const dropped = new Error("dropped");
-      (dropped as Error & { bytesSent: number }).bytesSent = bytesSent;
-      throw dropped;
-    }
     const acked = Number(ack.offset);
     if (acked >= file.size) {
       fileIndex += 1;
@@ -112,7 +132,15 @@ export async function sendPlan(link: PeerLink, plan: SendPlan, options: SendOpti
     } else {
       offset = acked;
     }
+    report("sending");
+    if (options.dropAfterChunks && chunks >= options.dropAfterChunks) {
+      link.close();
+      const dropped = new Error("dropped");
+      (dropped as Error & { bytesSent: number }).bytesSent = bytesSent;
+      throw dropped;
+    }
   }
+  report("writing");
   link.sendJson({ t: "commit" });
   const done = await link.nextJson();
   if (done.t === "error") throw new Error(String(done.message ?? "transfer failed"));
@@ -126,6 +154,14 @@ export async function sendPlan(link: PeerLink, plan: SendPlan, options: SendOpti
     launched: Boolean(done.launched),
     bytesSent,
   };
+}
+
+function bytesBefore(files: readonly { size: number }[], fileIndex: number, offset: number): number {
+  let sum = 0;
+  const end = Math.min(fileIndex, files.length);
+  for (let index = 0; index < end; index += 1) sum += files[index].size;
+  if (fileIndex < files.length && offset > 0) sum += offset;
+  return sum;
 }
 
 export async function readRange(file: LocalFile, offset: number, length: number): Promise<Buffer> {

@@ -86,7 +86,7 @@ export async function startListener(options: { root?: string; home?: string } = 
       launch: async (sessionFile, cwd) => {
         const result = launchPi(sessionFile, cwd);
         const line = result.started
-          ? `pi session started: ${result.command}`
+          ? `resumed pi session (${result.note})`
           : `${result.note}\n${result.command}`;
         console.log(line);
         if (!result.started) {

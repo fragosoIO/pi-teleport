@@ -11,6 +11,7 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { configRoot, configuredProjects, loadConfig, parseHostPort, parsePairingMode, parseYesNo, resolveProjectsDir, saveConfig, SUGGESTED_PROJECTS } from "./core/config.ts";
+import { findPiBinary } from "./core/launch.ts";
 import { RELAY_PORT } from "./core/constants.ts";
 import { installUserService, uninstallUserService, userServiceStatus } from "./core/service.ts";
 import { startListener } from "./listener.ts";
@@ -31,7 +32,7 @@ const HELP = `pi-teleport
   save <name> <pubkey>   save a one-time peer as a short name
   peers                  list computers the listener can see
   status                 show this computer's name, key, and relay
-  attach                 start the received pi session in this terminal
+  attach                 resume the received session in this terminal
 `;
 
 async function main(argv: string[]): Promise<void> {
@@ -148,7 +149,9 @@ async function main(argv: string[]): Promise<void> {
       }
       const record = launch as { sessionFile?: string; cwd?: string };
       if (!record.sessionFile || !record.cwd) continue;
-      const child = spawn("pi", ["--session", record.sessionFile], { cwd: record.cwd, stdio: "inherit" });
+      const pi = findPiBinary(homedir(), process.env);
+      if (!pi) throw new Error("pi is not installed");
+      const child = spawn(pi, ["--session", record.sessionFile], { cwd: record.cwd, stdio: "inherit" });
       const code = await once(child, "exit");
       process.exitCode = typeof code[0] === "number" ? code[0] : 1;
       return;

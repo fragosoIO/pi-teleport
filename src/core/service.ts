@@ -27,7 +27,8 @@ Type=simple
 ExecStart=${systemdArg(options.node)} ${systemdArg(options.script)} listen
 Restart=always
 RestartSec=2
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+KillMode=process
+Environment=PATH=%h/.pi/agent/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 
 [Install]
 WantedBy=default.target

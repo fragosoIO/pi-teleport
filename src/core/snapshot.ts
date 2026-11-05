@@ -31,6 +31,23 @@ export interface Snapshot {
   failures: string[];
 }
 
+export interface SnapshotProgress {
+  phase: "listing" | "reading";
+  /** Files listed so far, or bytes read, depending on `phase`. */
+  done: number;
+  /** Total bytes to read. Set only while reading. */
+  total?: number;
+  file?: string;
+  fileIndex: number;
+  /** Files found, including the session. Set only while reading. */
+  fileCount?: number;
+}
+
+export function fileLabel(file: Pick<LocalFile, "kind" | "relative" | "sourcePath">): string | undefined {
+  if (file.kind === "session") return "session";
+  return file.relative ?? file.sourcePath;
+}
+
 export async function buildSnapshot(options: {
   project: string;
   home: string;
@@ -43,27 +60,37 @@ export async function buildSnapshot(options: {
   entries: readonly JsonRecord[];
   /** Absolute path of the live session file, when pi has already flushed one. */
   sessionFile?: string;
+  onProgress?: (event: SnapshotProgress) => void;
 }): Promise<Snapshot> {
   const from: PathRoots = { os: options.os, home: options.home, project: options.project };
   const failures: string[] = [];
   const files: LocalFile[] = [];
-  await walk(options.project, options.project, files, failures);
+  const listed = (file: LocalFile) => {
+    options.onProgress?.({
+      phase: "listing",
+      done: files.length,
+      file: fileLabel(file),
+      fileIndex: files.length - 1,
+    });
+  };
+  await walk(options.project, options.project, files, failures, listed);
 
   const touched = await listExternalFiles(options.entries, options.project, options.home, options.os, options.sessionFile);
   for (const sourcePath of touched) {
     try {
       const stat = await lstat(sourcePath);
       if (!stat.isFile()) continue;
-      const bytesHash = await hashFile(sourcePath);
-      files.push({
-        index: files.length,
+      const file: LocalFile = {
+        index: 0,
         kind: "external",
         size: stat.size,
         mode: stat.mode & 0o777,
         sourcePath,
-        sha256: bytesHash,
+        sha256: "",
         diskPath: sourcePath,
-      });
+      };
+      files.push(file);
+      listed(file);
     } catch (error) {
       failures.push(`${sourcePath}: ${(error as Error).message}`);
     }
@@ -71,14 +98,15 @@ export async function buildSnapshot(options: {
 
   const sessionBytes = Buffer.from(options.sessionJsonl);
   files.push({
-    index: files.length,
+    index: 0,
     kind: "session",
     size: sessionBytes.length,
     mode: 0o600,
-    sha256: createHash("sha256").update(sessionBytes).digest("hex"),
+    sha256: "",
     bytes: sessionBytes,
   });
-  reindex(files);
+  const kept = await hashListed(files, failures, options.onProgress);
+  reindex(kept);
 
   const commands = collectCommands(options.entries);
   const manifest = createManifest({
@@ -86,10 +114,10 @@ export async function buildSnapshot(options: {
     target: { ...options.target, name: options.peerName },
     destPath: options.destPath,
     toolsUsed: recordToolsUsed(commands),
-    externalFileCount: files.filter((file) => file.kind === "external").length,
+    externalFileCount: kept.filter((file) => file.kind === "external").length,
     createdAt: new Date().toISOString(),
   });
-  return { files, manifest, failures };
+  return { files: kept, manifest, failures };
 }
 
 function reindex(files: LocalFile[]): void {
@@ -98,7 +126,66 @@ function reindex(files: LocalFile[]): void {
   });
 }
 
-async function walk(root: string, dir: string, files: LocalFile[], failures: string[]): Promise<void> {
+async function hashListed(
+  files: readonly LocalFile[],
+  failures: string[],
+  onProgress?: (event: SnapshotProgress) => void,
+): Promise<LocalFile[]> {
+  const kept: LocalFile[] = [];
+  let total = files.reduce((sum, file) => sum + file.size, 0);
+  let done = 0;
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
+    const base = done;
+    const report = () => {
+      onProgress?.({
+        phase: "reading",
+        done,
+        total,
+        file: fileLabel(file),
+        fileIndex: index,
+        fileCount: files.length,
+      });
+    };
+    report();
+    try {
+      let accounted = 0;
+      await hashOne(file, (n) => {
+        accounted += n;
+        done = base + Math.min(file.size, accounted);
+        report();
+      });
+      done = base + file.size;
+      report();
+      kept.push(file);
+    } catch (error) {
+      done = base;
+      total -= file.size;
+      const path = file.diskPath ?? file.sourcePath ?? file.relative ?? "session";
+      failures.push(`${path}: ${(error as Error).message}`);
+    }
+  }
+  return kept;
+}
+
+async function hashOne(file: LocalFile, onBytes: (n: number) => void): Promise<void> {
+  if (file.directory || file.symlink !== undefined) return;
+  if (file.bytes) {
+    file.sha256 = createHash("sha256").update(file.bytes).digest("hex");
+    if (file.bytes.length > 0) onBytes(file.bytes.length);
+    return;
+  }
+  if (!file.diskPath) return;
+  file.sha256 = await hashFile(file.diskPath, onBytes);
+}
+
+async function walk(
+  root: string,
+  dir: string,
+  files: LocalFile[],
+  failures: string[],
+  onFile?: (file: LocalFile) => void,
+): Promise<void> {
   let names: string[];
   try {
     names = await readdir(dir);
@@ -108,7 +195,7 @@ async function walk(root: string, dir: string, files: LocalFile[], failures: str
   }
   names.sort();
   if (names.length === 0 && dir !== root) {
-    files.push({
+    const file: LocalFile = {
       index: 0,
       kind: "project",
       size: 0,
@@ -116,7 +203,9 @@ async function walk(root: string, dir: string, files: LocalFile[], failures: str
       relative: relativePosix(root, dir),
       directory: true,
       sha256: "",
-    });
+    };
+    files.push(file);
+    onFile?.(file);
   }
   for (const name of names) {
     const absolute = join(dir, name);
@@ -131,7 +220,7 @@ async function walk(root: string, dir: string, files: LocalFile[], failures: str
     if (stat.isSymbolicLink()) {
       try {
         const target = await readlink(absolute);
-        files.push({
+        const file: LocalFile = {
           index: 0,
           kind: "project",
           size: 0,
@@ -140,33 +229,33 @@ async function walk(root: string, dir: string, files: LocalFile[], failures: str
           symlink: target,
           sha256: "",
           diskPath: absolute,
-        });
+        };
+        files.push(file);
+        onFile?.(file);
       } catch (error) {
         failures.push(`${absolute}: ${(error as Error).message}`);
       }
       continue;
     }
     if (stat.isDirectory()) {
-      await walk(root, absolute, files, failures);
+      await walk(root, absolute, files, failures, onFile);
       continue;
     }
     if (!stat.isFile()) {
       failures.push(`${absolute}: not a regular file, skipped`);
       continue;
     }
-    try {
-      files.push({
-        index: 0,
-        kind: "project",
-        size: stat.size,
-        mode: stat.mode & 0o777,
-        relative,
-        sha256: await hashFile(absolute),
-        diskPath: absolute,
-      });
-    } catch (error) {
-      failures.push(`${absolute}: ${(error as Error).message}`);
-    }
+    const file: LocalFile = {
+      index: 0,
+      kind: "project",
+      size: stat.size,
+      mode: stat.mode & 0o777,
+      relative,
+      sha256: "",
+      diskPath: absolute,
+    };
+    files.push(file);
+    onFile?.(file);
   }
 }
 
@@ -211,12 +300,16 @@ export function resolveTouched(candidate: string, project: string, home: string,
   return resolve(project, candidate);
 }
 
-export async function hashFile(path: string): Promise<string> {
+export async function hashFile(path: string, onBytes?: (n: number) => void): Promise<string> {
   const hash = createHash("sha256");
   const handle = await open(path, "r");
   try {
     const stream = handle.createReadStream();
-    for await (const chunk of stream) hash.update(chunk as Buffer);
+    for await (const chunk of stream) {
+      const buf = chunk as Buffer;
+      hash.update(buf);
+      onBytes?.(buf.length);
+    }
   } finally {
     await handle.close();
   }

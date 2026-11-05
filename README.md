@@ -1,6 +1,6 @@
 # pi-teleport
 
-A [pi](https://pi.dev) harness plugin. While you are coding in pi, `/teleport` sends the live session to another computer you control. That computer starts a **new** pi session from the same state. It does not attach to a pi process that is already running.
+A [pi](https://pi.dev) harness plugin. While you are coding in pi, `/teleport` sends the live session to another computer you control. That computer resumes it in a new pi process (`pi --session`), in a terminal on the logged-in desktop, or in an attached tmux or zellij session.
 
 Both computers run code from this repo: the slash command, a small background listener, and (only when you need it) a relay. Nothing here calls Cursor. Models stay whatever pi is already configured to use on each machine.
 
@@ -119,18 +119,18 @@ Restart the service after changing the relay (`systemctl --user restart pi-telep
 1. `pi-teleport setup` on both, and start the service when it asks.
 2. In pi, on the source: `/teleport`, then the other computer. The code is asked only the first time. After that, `/teleport laptop` connects with the saved name.
 3. Confirm the folder name and path. The path is that computer's projects folder plus the project name.
-4. The other listener writes the tree, rewrites the session, and starts `pi --session <file>` in a new terminal when it can find one.
+4. The other listener writes the tree, rewrites the session, and resumes it with `pi --session <file>`.
 5. The source session freezes.
 
-On an SSH session with no graphical terminal, the listener does not open a window. In a terminal on the receiving computer:
+The listener borrows the display from the logged-in desktop when its own service has none. An attached tmux or zellij session gets a new window or tab. When neither is available, resume it from a terminal on the receiving computer:
 
 ```bash
 pi-teleport attach
 ```
 
-That starts a new pi with the received session. It is not attached to an existing pi process.
+That runs `pi --session` for the received file in this terminal.
 
-To send the session back, run `/teleport <the-other-name>` in the new session. The computer you are leaving freezes. The computer you return to gets a new pi session.
+To send the session back, run `/teleport <the-other-name>` in the resumed session. The computer you are leaving freezes. The computer you return to resumes a new pi process on the updated session.
 
 To keep working on a frozen session:
 
@@ -139,6 +139,14 @@ To keep working on a frozen session:
 ```
 
 pi asks you to confirm. The other copy will not update, and the two sides can diverge.
+
+To list sessions this computer sent that are still frozen here:
+
+```text
+/teleport resume
+```
+
+The list is every session sent to another computer that this computer has not resumed. Pick one to open it. That session then leaves the list. It stays frozen until `/teleport unfreeze`. Unfreeze also removes it from the list.
 
 ## Layout
 

@@ -17,9 +17,20 @@ import {
   writesThatCollide,
 } from "./core/overwrite.ts";
 import { defaultDestination, folderNameOf, type OsName, type PathRoots } from "./core/paths.ts";
+import {
+  barFilled,
+  createProgressThrottle,
+  formatProgress,
+  listingState,
+  readingState,
+  retryState,
+  sendingState,
+  type ProgressState,
+} from "./core/progress.ts";
 import type { JsonRecord } from "./core/session.ts";
 import { buildSnapshot, listExternalFiles } from "./core/snapshot.ts";
-import { probeDestination, sendPlan, type SendPlan } from "./core/transfer.ts";
+import { collectOutboundSessions, loadResumedIds, outboundChoices, pendingOutbound, rememberResumed, resumedFile, sessionSearchRoots } from "./core/sent.ts";
+import { probeDestination, sendPlan, type SendPlan, type SendProgress } from "./core/transfer.ts";
 import type { PeerLink } from "./core/link.ts";
 
 interface FreezeData {
@@ -53,14 +64,18 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("teleport", {
-    description: "Teleport this session and project to another computer",
+    description: "Teleport this session, resume one sent earlier, or unfreeze",
     getArgumentCompletions: (prefix) => {
-      const names = ["unfreeze", ...pairingNames()];
+      const names = ["resume", "unfreeze", ...pairingNames()];
       const items = names.filter((name) => name.startsWith(prefix)).map((value) => ({ value, label: value }));
       return items.length > 0 ? items : null;
     },
     handler: async (args, ctx) => {
       const arg = args.trim();
+      if (arg === "resume") {
+        await resumeSent(ctx);
+        return;
+      }
       if (frozen || arg === "unfreeze") {
         if (arg && arg !== "unfreeze") {
           ctx.ui.notify("This session is frozen. Run /teleport unfreeze before sending again.", "warning");
@@ -151,6 +166,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (!link || !hello) return;
+      let progress: { stop(): void } | undefined;
       try {
         if (!hello.os || !hello.home) throw new Error("the other computer did not announce its home directory");
         const remoteProjects = hello.projects?.trim() ?? "";
@@ -200,7 +216,14 @@ export default function (pi: ExtensionAPI) {
           }
           break;
         }
-        ctx.ui.setStatus("pi-teleport", `sending to ${hello.name}…`);
+        let latest: ProgressState = { peer: hello.name, status: "Listing project files", done: 0 };
+        const paint = createProgressThrottle((state) => showProgress(ctx, state));
+        progress = paint;
+        const show = (state: ProgressState) => {
+          latest = state;
+          paint.push(state);
+        };
+        show(latest);
         const header = ctx.sessionManager.getHeader();
         const sessionJsonl = `${JSON.stringify(header ?? { type: "session", version: 3, id: ctx.sessionManager.getSessionId(), timestamp: new Date().toISOString(), cwd: ctx.cwd })}\n${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
         const snapshot = await buildSnapshot({
@@ -214,6 +237,10 @@ export default function (pi: ExtensionAPI) {
           sessionJsonl,
           entries,
           sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+          onProgress: (event) => {
+            if (event.phase === "listing") show(listingState(event.done, event.file, hello.name));
+            else show(readingState(event, hello.name));
+          },
         });
         for (const failure of snapshot.failures) ctx.ui.notify(failure, "warning");
         const plan: SendPlan = {
@@ -224,6 +251,13 @@ export default function (pi: ExtensionAPI) {
           skipSourcePaths: skipIds,
           files: snapshot.files,
         };
+        const bytes = snapshot.files.reduce((sum, file) => sum + file.size, 0);
+        show({
+          peer: hello.name,
+          status: snapshot.files.length > 0 ? `Sending  1/${snapshot.files.length}` : "Sending",
+          done: 0,
+          total: bytes,
+        });
         const result = await sendWithResume(link, plan, async () => {
           const again = await connectToPeer({
             target: dialTarget,
@@ -235,11 +269,19 @@ export default function (pi: ExtensionAPI) {
           });
           link = again.link;
           return again.link;
-        }, (text) => ctx.ui.setStatus("pi-teleport", text));
+        }, {
+          onProgress: (event) => show(sendingState(event, hello.name)),
+          onRetry: (attempt) => {
+            show(retryState(latest, attempt));
+            paint.flush();
+          },
+        });
+        paint.stop();
         pi.appendEntry(FREEZE_TYPE, { frozen: true, at: new Date().toISOString(), peer: hello.name, dest });
         showFrozen(ctx, true);
         ctx.ui.notify("Teleport finished. This session is frozen. /teleport unfreeze to continue here.", "info");
-        if (!result.launched && result.launchCommand) ctx.ui.notify(`On the other computer: ${result.launchCommand}`, "info");
+        if (result.launched) ctx.ui.notify(`Session resumed on ${hello.name}.`, "info");
+        else if (result.launchCommand) ctx.ui.notify(`On ${hello.name}, run: ${result.launchCommand}`, "info");
         for (const failure of result.symlinkFailures) ctx.ui.notify(failure, "error");
         if (result.primaryFallback > 0) {
           ctx.ui.notify(`${result.primaryFallback} files could not be written outside the project. The session uses the copies inside it.`, "warning");
@@ -247,11 +289,54 @@ export default function (pi: ExtensionAPI) {
       } catch (error) {
         ctx.ui.notify((error as Error).message, "error");
       } finally {
+        progress?.stop();
         link?.finish();
-        if (!frozen) ctx.ui.setStatus("pi-teleport", undefined);
+        if (!frozen) {
+          ctx.ui.setStatus("pi-teleport", undefined);
+          ctx.ui.setWidget("pi-teleport", undefined);
+        }
       }
     },
   });
+}
+
+async function resumeSent(ctx: ExtensionCommandContext): Promise<void> {
+  const root = configRoot();
+  const resumed = await loadResumedIds(resumedFile(root));
+  const sessions = pendingOutbound(
+    await collectOutboundSessions(sessionSearchRoots(ctx.sessionManager.getSessionDir(), homedir())),
+    resumed,
+  );
+  if (sessions.length === 0) {
+    ctx.ui.notify("No sessions sent to other computers are waiting to resume here.", "info");
+    return;
+  }
+  const choices = outboundChoices(sessions);
+  if (!ctx.hasUI) {
+    for (const choice of choices) ctx.ui.notify(choice.label, "info");
+    return;
+  }
+  const selected = await ctx.ui.select("Sessions sent to other computers", choices.map((choice) => choice.label));
+  if (!selected) return;
+  const session = choices.find((choice) => choice.label === selected)?.session;
+  if (!session) return;
+  const file = resumedFile(root);
+  if (session.sessionFile === ctx.sessionManager.getSessionFile()) {
+    await rememberResumed(file, session.sessionId).catch(() => undefined);
+    ctx.ui.notify(`This session is already open. It was sent to ${session.peer} and stays frozen until /teleport unfreeze.`, "info");
+    return;
+  }
+  try {
+    const result = await ctx.switchSession(session.sessionFile, {
+      withSession: async (next) => {
+        await rememberResumed(file, session.sessionId).catch(() => undefined);
+        next.ui.notify(`Opened the session sent to ${session.peer}. It stays frozen until /teleport unfreeze.`, "info");
+      },
+    });
+    if (result.cancelled) return;
+  } catch (error) {
+    ctx.ui.notify((error as Error).message, "error");
+  }
 }
 
 function readFrozen(entries: readonly { type?: string; customType?: string; data?: unknown }[]): boolean {
@@ -331,7 +416,10 @@ async function sendWithResume(
   link: PeerLink,
   plan: SendPlan,
   redial: () => Promise<PeerLink>,
-  status: (text: string) => void,
+  hooks: {
+    onProgress: (event: SendProgress) => void;
+    onRetry: (attempt: number) => void;
+  },
 ) {
   let current = link;
   let resume = false;
@@ -339,15 +427,32 @@ async function sendWithResume(
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
       if (attempt > 0) current = await redial();
-      return await sendPlan(current, plan, { resume });
+      return await sendPlan(current, plan, { resume, onProgress: hooks.onProgress });
     } catch (error) {
       lastError = error as Error;
       current.finish();
       resume = true;
-      status(`connection dropped, resuming (${attempt + 1})…`);
+      hooks.onRetry(attempt + 1);
     }
   }
   throw lastError ?? new Error("transfer failed");
+}
+
+function showProgress(ctx: ExtensionCommandContext, state: ProgressState): void {
+  const theme = ctx.ui.theme;
+  const view = formatProgress(state);
+  const bar = (filled: number, width: number) =>
+    theme.fg("accent", "█".repeat(filled)) + theme.fg("dim", "░".repeat(Math.max(0, width - filled)));
+  const meter = [bar(view.filled, view.width), view.percent, view.amounts].filter((part) => part).join("  ");
+  ctx.ui.setWidget("pi-teleport", [
+    theme.fg("text", view.title),
+    meter,
+    theme.fg("muted", view.detail),
+  ]);
+  const status = [bar(barFilled(view.fraction, 12), 12), view.percent, theme.fg("muted", view.status)]
+    .filter((part) => part)
+    .join("  ");
+  ctx.ui.setStatus("pi-teleport", status);
 }
 
 function controlJson(port: number, path: string, method = "GET", body?: unknown): Promise<unknown> {

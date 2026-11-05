@@ -9,7 +9,7 @@ import test from "node:test";
 import { createIdentity } from "../src/core/crypto.ts";
 import { handshakeListener, handshakeSender } from "../src/core/link.ts";
 import type { SessionManifest } from "../src/core/manifest.ts";
-import { receiveSession, sendPlan, type SendPlan } from "../src/core/transfer.ts";
+import { receiveSession, sendPlan, type SendPlan, type SendProgress } from "../src/core/transfer.ts";
 
 test("a dropped socket resumes from the last acked byte", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-teleport-"));
@@ -95,10 +95,27 @@ test("a dropped socket resumes from the last acked byte", async () => {
   };
 
   try {
+    const firstProgress: SendProgress[] = [];
     const first = await dial();
-    await assert.rejects(() => sendPlan(first.link, plan, { chunkSize: 100, dropAfterChunks: 1 }), /dropped/);
+    await assert.rejects(() => sendPlan(first.link, plan, {
+      chunkSize: 100,
+      dropAfterChunks: 1,
+      onProgress: (event) => firstProgress.push(event),
+    }), /dropped/);
+    assert.equal(firstProgress.at(-1)?.phase, "sending");
+    assert.equal(firstProgress.at(-1)?.done, 100);
+    assert.equal(firstProgress.at(-1)?.file, "payload.bin");
+    const secondProgress: SendProgress[] = [];
     const second = await dial();
-    const result = await sendPlan(second.link, plan, { chunkSize: 100, resume: true });
+    const result = await sendPlan(second.link, plan, {
+      chunkSize: 100,
+      resume: true,
+      onProgress: (event) => secondProgress.push(event),
+    });
+    assert.equal(secondProgress[0]?.done, 100);
+    assert.equal(secondProgress.at(-1)?.phase, "writing");
+    assert.equal(secondProgress.at(-1)?.done, payload.length + session.length);
+    assert.ok(secondProgress.some((event) => event.file === "session"));
     assert.ok(result.bytesSent < payload.length + session.length);
     assert.ok(result.bytesSent > 0);
     const restored = await readFile(join(dest, "payload.bin"));
