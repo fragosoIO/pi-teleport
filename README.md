@@ -2,7 +2,7 @@
 
 A [pi](https://pi.dev) harness plugin. While you are coding in pi, `/teleport` sends the live session to another computer you control. That computer resumes it in a new pi process (`pi --session`), in a terminal on the logged-in desktop, or in an attached tmux or zellij session.
 
-Both computers run code from this repo: the slash command, a small background listener, and (only when you need it) a relay. Nothing here calls Cursor. Models stay whatever pi is already configured to use on each machine.
+Both computers run code from this repo: the slash command, a small background listener, and (only when you need it) a relay. Nothing here calls Cursor. When this computer is the target, the resumed session uses the model chosen in `pi-teleport setup`.
 
 The transfer is encrypted on every path (X25519, then AES-256-GCM). A relay only sees a short name or a one-time code so it can pair the two listeners. It cannot read the files.
 
@@ -43,11 +43,12 @@ pi-teleport name laptop          # a short name for this computer
 pi-teleport setup
 ```
 
-`pi-teleport setup` is required on each computer before `/teleport` or the listener will run. It asks three questions:
+`pi-teleport setup` is required on each computer before `/teleport` or the listener will run. It asks four questions:
 
 1. The projects folder. Press Enter for `~/.pi-teleport/projects`. That folder is created if it is missing. Any other path must already exist.
 2. `code` to require a one-time code, or `all` to accept any computer that can reach this service.
-3. `y` or `n` to start the service now.
+3. The model pi uses when a session resumes on this computer. The list is `pi --list-models`. Press Enter for the model in brackets, or type a number or `provider/model`.
+4. `y` or `n` to start the service now.
 
 Run setup again to change the answers. Choosing `y` restarts the service when it is already running, so it loads this program and the answers just saved. A listener that is already the current program reads a later setup on the next connection. A listener still running the previous program does not, until it is restarted.
 
@@ -119,7 +120,7 @@ Restart the service after changing the relay (`systemctl --user restart pi-telep
 1. `pi-teleport setup` on both, and start the service when it asks.
 2. In pi, on the source: `/teleport`, then the other computer. The code is asked only the first time. After that, `/teleport laptop` connects with the saved name.
 3. Confirm the folder name and path. The path is that computer's projects folder plus the project name.
-4. The other listener writes the tree, rewrites the session, and resumes it with `pi --session <file>`.
+4. The other listener writes the tree, rewrites the session, and resumes it with `pi --session <file> --model <provider/model>`. That model is the one chosen on the receiving computer.
 5. The source session freezes.
 
 The listener borrows the display from the logged-in desktop when its own service has none. An attached tmux or zellij session gets a new window or tab. When neither is available, resume it from a terminal on the receiving computer:
@@ -128,7 +129,7 @@ The listener borrows the display from the logged-in desktop when its own service
 pi-teleport attach
 ```
 
-That runs `pi --session` for the received file in this terminal.
+That runs `pi --session` for the received file in this terminal, with the model chosen in setup.
 
 To send the session back, run `/teleport <the-other-name>` in the resumed session. The computer you are leaving freezes. The computer you return to resumes a new pi process on the updated session.
 

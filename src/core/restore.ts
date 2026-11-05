@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { planExternalPlacement, type ExternalPlacement } from "./external.ts";
 import type { SessionManifest } from "./manifest.ts";
+import type { ResumeModel } from "./models.ts";
 import { assertSafeDestination, joinOs, piSessionDirName, type PathRoots } from "./paths.ts";
 import { rewriteSession } from "./session.ts";
 import type { FileMeta } from "./snapshot.ts";
@@ -36,6 +37,8 @@ export async function applyTransfer(options: {
   state: TransferState;
   stageDir: string;
   sessionsRoot: string;
+  /** Model this computer uses when the received session resumes. */
+  resumeModel?: ResumeModel;
   /** When set, a file write uses this instead of the real filesystem. Tests use the default. */
   now?: Date;
 }): Promise<ApplyResult> {
@@ -107,6 +110,7 @@ export async function applyTransfer(options: {
     dest,
     placements.map((item) => ({ from: item.sourcePath, to: item.sessionPath })),
     { sourceCwd: from.project },
+    options.resumeModel,
     options.now,
   );
   const sessionDir = join(options.sessionsRoot, piSessionDirName(dest));

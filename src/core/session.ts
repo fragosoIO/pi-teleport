@@ -1,13 +1,15 @@
 /**
  * Pi sessions are JSONL. Version 3, header then tree entries with id/parentId.
- * The restored file is a new session id in the destination cwd. Model selections
- * are dropped so the target keeps whatever model pi is already configured to use.
+ * The restored file is a new session id in the destination cwd. Source model
+ * selections are dropped. A resume model from this computer is written at the
+ * end of the branch, so pi restores that model when the session resumes here.
  * Entry ids stay so the conversation tree still links.
  */
 
 import { randomUUID } from "node:crypto";
 
 import { ORIGIN_TYPE } from "./constants.ts";
+import type { ResumeModel } from "./models.ts";
 import { rewriteText, type ExactReplacement, type PathRoots } from "./paths.ts";
 
 export interface JsonRecord {
@@ -27,6 +29,7 @@ export function rewriteSession(
   destCwd: string,
   exact: readonly ExactReplacement[],
   origin: { sourceSessionId?: string; sourceCwd: string },
+  resumeModel?: ResumeModel,
   now = new Date(),
 ): RewriteSessionResult {
   const records = parseJsonl(jsonl);
@@ -62,7 +65,18 @@ export function rewriteSession(
       sourceCwd: origin.sourceCwd,
     },
   };
-  const lines = [rewrittenHeader, ...rewrittenEntries, originEntry].map((record) => JSON.stringify(record));
+  const modelEntry: JsonRecord | undefined = resumeModel
+    ? {
+        type: "model_change",
+        id: randomUUID().slice(0, 8),
+        parentId: originEntry.id,
+        timestamp,
+        provider: resumeModel.provider,
+        modelId: resumeModel.id,
+      }
+    : undefined;
+  const lines = [rewrittenHeader, ...rewrittenEntries, originEntry, ...(modelEntry ? [modelEntry] : [])]
+    .map((record) => JSON.stringify(record));
   return { jsonl: `${lines.join("\n")}\n`, sessionId, cwd: destCwd };
 }
 

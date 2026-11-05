@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 
 import { CHUNK_SIZE } from "./constants.ts";
 import type { PeerLink } from "./link.ts";
+import type { ResumeModel } from "./models.ts";
 import { assertSafeDestination, type OsName } from "./paths.ts";
 import { noteChunk, resumeCursor, type FileCursor } from "./resume.ts";
 import { applyTransfer, type StoredFile, type TransferState } from "./restore.ts";
@@ -184,6 +185,8 @@ export interface ReceiverOptions {
   home: string;
   os: OsName;
   exists: (path: string) => Promise<boolean>;
+  /** Model this computer uses when the received session resumes. */
+  resumeModel?: ResumeModel;
   launch: (sessionFile: string, cwd: string) => Promise<{ started: boolean; command: string }>;
 }
 
@@ -284,6 +287,7 @@ async function receiveBody(link: PeerLink, state: TransferState, options: Receiv
         state,
         stageDir: join(options.stateRoot, state.transferId, "stage"),
         sessionsRoot: options.sessionsRoot,
+        resumeModel: options.resumeModel,
       });
       const launch = await options.launch(applied.sessionFile, state.destPath);
       link.sendJson({

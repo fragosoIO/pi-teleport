@@ -59,6 +59,7 @@ export async function startListener(options: { root?: string; home?: string } = 
   async function serve(socket: Socket): Promise<void> {
     config = await loadConfig(root);
     const projects = configuredProjects(config);
+    const resumeModel = config.model;
     const accepted = await handshakeListener(socket, identity, {
       name: config.name,
       os: currentOs(),
@@ -75,6 +76,7 @@ export async function startListener(options: { root?: string; home?: string } = 
         : join(home, ".pi", "agent", "sessions"),
       home,
       os: currentOs(),
+      resumeModel,
       exists: async (path) => {
         try {
           await lstat(path);
@@ -84,7 +86,7 @@ export async function startListener(options: { root?: string; home?: string } = 
         }
       },
       launch: async (sessionFile, cwd) => {
-        const result = launchPi(sessionFile, cwd);
+        const result = launchPi(sessionFile, cwd, resumeModel);
         const line = result.started
           ? `resumed pi session (${result.note})`
           : `${result.note}\n${result.command}`;

@@ -4,6 +4,8 @@ import { accessSync, constants, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { modelRef, type ResumeModel } from "./models.ts";
+
 const ATTACH = "pi-teleport attach";
 const GRAPHICAL_KEYS = ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CURRENT_DESKTOP"] as const;
 
@@ -41,6 +43,8 @@ export interface LaunchContext {
   zellijSession: string | null;
   wezterm: boolean;
   launchDisabled: boolean;
+  /** Model chosen on this computer for a received session. */
+  model?: ResumeModel;
 }
 
 /**
@@ -49,9 +53,9 @@ export interface LaunchContext {
  * The listener often has no display of its own, so the plan borrows the
  * logged-in graphical session, or an attached tmux or zellij session.
  */
-export function launchPi(sessionFile: string, cwd: string): LaunchResult {
+export function launchPi(sessionFile: string, cwd: string, model?: ResumeModel): LaunchResult {
   try {
-    const plan = planFromProcess(sessionFile, cwd);
+    const plan = planFromProcess(sessionFile, cwd, model);
     if (!plan.run) return { started: false, command: plan.command, note: plan.note };
     const ok = plan.run.wait ? runAndWait(plan.run) : runDetached(plan.run);
     if (!ok) {
@@ -75,7 +79,7 @@ export function selectLaunch(input: LaunchContext): LaunchPlan {
   if (input.launchDisabled) return { started: false, command: ATTACH, note: "launch disabled" };
   if (!input.piPath) return { started: false, command: ATTACH, note: "pi is not installed on this computer" };
 
-  const command = `pi --session ${quote(input.sessionFile, input.platform)}`;
+  const command = resumeCommand(input);
   const terminal = findTerminal(input);
   if (terminal) {
     return {
@@ -92,7 +96,7 @@ export function selectLaunch(input: LaunchContext): LaunchPlan {
       note: "wezterm",
       run: {
         file: "wezterm",
-        args: ["cli", "spawn", "--cwd", input.cwd, "--", input.piPath, "--session", input.sessionFile],
+        args: ["cli", "spawn", "--cwd", input.cwd, "--", input.piPath, ...piResumeArgs(input.sessionFile, input.model)],
         env: input.env,
         cwd: input.cwd,
         wait: true,
@@ -106,7 +110,7 @@ export function selectLaunch(input: LaunchContext): LaunchPlan {
       note: "tmux",
       run: {
         file: "tmux",
-        args: ["new-window", "-t", input.tmuxSession, "-c", input.cwd, input.piPath, "--session", input.sessionFile],
+        args: ["new-window", "-t", input.tmuxSession, "-c", input.cwd, input.piPath, ...piResumeArgs(input.sessionFile, input.model)],
         env: input.env,
         cwd: input.cwd,
         wait: true,
@@ -120,7 +124,7 @@ export function selectLaunch(input: LaunchContext): LaunchPlan {
       note: "zellij",
       run: {
         file: "zellij",
-        args: ["--session", input.zellijSession, "action", "new-tab", "--cwd", input.cwd, "--", input.piPath, "--session", input.sessionFile],
+        args: ["--session", input.zellijSession, "action", "new-tab", "--cwd", input.cwd, "--", input.piPath, ...piResumeArgs(input.sessionFile, input.model)],
         env: input.env,
         cwd: input.cwd,
         wait: true,
@@ -132,6 +136,23 @@ export function selectLaunch(input: LaunchContext): LaunchPlan {
     command: ATTACH,
     note: "no terminal found; run pi-teleport attach in a terminal on that computer",
   };
+}
+
+/** Arguments after the pi binary: resume this file, and select the target model when one was chosen. */
+export function piResumeArgs(sessionFile: string, model?: ResumeModel): string[] {
+  const args = ["--session", sessionFile];
+  if (model) args.push("--model", modelRef(model));
+  return args;
+}
+
+function resumeCommand(input: LaunchContext): string {
+  const session = quote(input.sessionFile, input.platform);
+  if (!input.model) return `pi --session ${session}`;
+  return `pi --session ${session} --model ${quote(modelRef(input.model), input.platform)}`;
+}
+
+function quotedPiInvocation(pi: string, input: LaunchContext): string {
+  return `${quote(pi, input.platform)} ${piResumeArgs(input.sessionFile, input.model).map((arg) => quote(arg, input.platform)).join(" ")}`;
 }
 
 /** `~/.pi/agent/bin/pi` when the managed install is present, otherwise `pi` on PATH. */
@@ -197,7 +218,7 @@ export function withToolPath(env: NodeJS.ProcessEnv, home: string): NodeJS.Proce
   return { ...env, PATH: path };
 }
 
-function planFromProcess(sessionFile: string, cwd: string): LaunchPlan {
+function planFromProcess(sessionFile: string, cwd: string, model?: ResumeModel): LaunchPlan {
   const home = homedir();
   const base: NodeJS.ProcessEnv = { ...process.env, HOME: process.env.HOME || home };
   const sources = process.platform === "linux" ? scanSessionEnvirons() : [];
@@ -214,15 +235,16 @@ function planFromProcess(sessionFile: string, cwd: string): LaunchPlan {
     zellijSession: piPath ? attachedZellijSession() : null,
     wezterm: Boolean(piPath) && weztermRunning(),
     launchDisabled: process.env.PI_TELEPORT_NO_LAUNCH === "1",
+    model,
   });
 }
 
 function findTerminal(input: LaunchContext): { command: string; args: string[] } | null {
   const pi = input.piPath;
   if (!pi) return null;
-  const piArgs = ["--session", input.sessionFile];
+  const piArgs = piResumeArgs(input.sessionFile, input.model);
   if (input.platform === "darwin" && input.have("osascript")) {
-    const script = `tell application "Terminal" to do script "cd ${quote(input.cwd, input.platform)} && ${quote(pi, input.platform)} --session ${quote(input.sessionFile, input.platform)}"`;
+    const script = `tell application "Terminal" to do script "cd ${quote(input.cwd, input.platform)} && ${quotedPiInvocation(pi, input)}"`;
     return { command: "osascript", args: ["-e", script] };
   }
   if (input.platform === "win32") {
@@ -234,7 +256,7 @@ function findTerminal(input: LaunchContext): { command: string; args: string[] }
     { command: "x-terminal-emulator", args: ["-e", pi, ...piArgs] },
     { command: "gnome-terminal", args: [`--working-directory=${input.cwd}`, "--", pi, ...piArgs] },
     { command: "konsole", args: ["--workdir", input.cwd, "-e", pi, ...piArgs] },
-    { command: "xfce4-terminal", args: ["--working-directory", input.cwd, "-e", `${quote(pi, input.platform)} --session ${quote(input.sessionFile, input.platform)}`] },
+    { command: "xfce4-terminal", args: ["--working-directory", input.cwd, "-e", quotedPiInvocation(pi, input)] },
     { command: "alacritty", args: ["--working-directory", input.cwd, "-e", pi, ...piArgs] },
     { command: "kitty", args: ["--directory", input.cwd, pi, ...piArgs] },
     { command: "foot", args: ["--working-directory", input.cwd, pi, ...piArgs] },

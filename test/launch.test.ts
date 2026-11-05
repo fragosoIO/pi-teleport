@@ -57,6 +57,17 @@ test("an attached zellij session resumes the session when no terminal is availab
   assert.equal(plan.run?.args.at(-1), sessionFile);
 });
 
+test("a received session resumes on the model chosen for this computer", () => {
+  const plan = selectLaunch(context({
+    env: { PATH: "/usr/bin", DISPLAY: ":1" },
+    have: (command) => command === "kitty",
+    model: { provider: "vllm", id: "qwen3.8-flash-next" },
+  }));
+  assert.equal(plan.started, true);
+  assert.deepEqual(plan.run?.args.slice(-4), ["--session", sessionFile, "--model", "vllm/qwen3.8-flash-next"]);
+  assert.match(plan.command, /--model 'vllm\/qwen3\.8-flash-next'/);
+});
+
 test("with no terminal, resume waits for pi-teleport attach", () => {
   const plan = selectLaunch(context());
   assert.equal(plan.started, false);

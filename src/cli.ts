@@ -11,7 +11,8 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { configRoot, configuredProjects, loadConfig, parseHostPort, parsePairingMode, parseYesNo, resolveProjectsDir, saveConfig, SUGGESTED_PROJECTS } from "./core/config.ts";
-import { findPiBinary } from "./core/launch.ts";
+import { findPiBinary, piResumeArgs } from "./core/launch.ts";
+import { formatModelList, listPiModels, modelRef, parseModelChoice, suggestedModel, type ResumeModel } from "./core/models.ts";
 import { RELAY_PORT } from "./core/constants.ts";
 import { installUserService, uninstallUserService, userServiceStatus } from "./core/service.ts";
 import { startListener } from "./listener.ts";
@@ -19,7 +20,7 @@ import { startRelay } from "./relay.ts";
 
 const HELP = `pi-teleport
 
-  setup                  choose the projects folder, pairing, and whether to start the service
+  setup                  choose the projects folder, pairing, resume model, and whether to start the service
   listen                 run the listener in the foreground (prints a one-time code)
   service install        run the listener as a user service on this computer
   service uninstall      stop and remove that service
@@ -48,12 +49,15 @@ async function main(argv: string[]): Promise<void> {
     const config = await loadConfig(root);
     const dir = await askProjects();
     const requireCode = await askPairing();
+    const model = await askModel(config.model);
     const start = await askService();
     config.projects = dir;
     config.requireCode = requireCode;
+    config.model = model;
     await saveConfig(config, root);
     console.log(`projects folder is ${dir}`);
     console.log(requireCode ? "a one-time code is required" : "teleports are accepted from any computer");
+    console.log(`a session that resumes here uses ${modelRef(model)}`);
     if (!start) {
       console.log("the service was not started");
       return;
@@ -151,7 +155,7 @@ async function main(argv: string[]): Promise<void> {
       if (!record.sessionFile || !record.cwd) continue;
       const pi = findPiBinary(homedir(), process.env);
       if (!pi) throw new Error("pi is not installed");
-      const child = spawn(pi, ["--session", record.sessionFile], { cwd: record.cwd, stdio: "inherit" });
+      const child = spawn(pi, piResumeArgs(record.sessionFile, config.model), { cwd: record.cwd, stdio: "inherit" });
       const code = await once(child, "exit");
       process.exitCode = typeof code[0] === "number" ? code[0] : 1;
       return;
@@ -176,6 +180,23 @@ async function askPairing(): Promise<boolean> {
     const given = await ask("Require a one-time code, or accept all? [code/all]: ");
     try {
       return parsePairingMode(given) === "code";
+    } catch (error) {
+      console.log((error as Error).message);
+    }
+  }
+}
+
+async function askModel(current?: ResumeModel): Promise<ResumeModel> {
+  const pi = findPiBinary(homedir(), process.env);
+  if (!pi) throw new Error("pi is not installed");
+  const models = listPiModels(pi, process.env);
+  const fallback = suggestedModel(models, current);
+  console.log("Models pi can use when a session resumes on this computer:");
+  console.log(formatModelList(models));
+  for (;;) {
+    const given = await ask(`Default model [${modelRef(fallback)}]: `);
+    try {
+      return parseModelChoice(given, models, fallback);
     } catch (error) {
       console.log((error as Error).message);
     }

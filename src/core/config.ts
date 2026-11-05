@@ -4,6 +4,7 @@ import { join, parse, resolve } from "node:path";
 
 import { BEACON_PORT, CONTROL_PORT, LAN_PORT } from "./constants.ts";
 import { createIdentity, type Identity } from "./crypto.ts";
+import { resumeModelFromConfig, type ResumeModel } from "./models.ts";
 import type { OsName } from "./paths.ts";
 
 export interface Pairing {
@@ -20,6 +21,8 @@ export interface TeleportConfig {
   projects?: string;
   /** When false, any reachable computer may teleport here without a one-time code. */
   requireCode?: boolean;
+  /** Model pi uses when a session resumes on this computer. */
+  model?: ResumeModel;
   pairings: Record<string, Pairing>;
 }
 
@@ -84,7 +87,8 @@ export function defaultConfig(): TeleportConfig {
 export async function loadConfig(root = configRoot()): Promise<TeleportConfig> {
   try {
     const raw = JSON.parse(await readFile(join(root, "config.json"), "utf8")) as Partial<TeleportConfig>;
-    return { ...defaultConfig(), ...raw, pairings: raw.pairings ?? {} };
+    const model = resumeModelFromConfig(raw.model);
+    return { ...defaultConfig(), ...raw, pairings: raw.pairings ?? {}, model };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return defaultConfig();
     throw error;

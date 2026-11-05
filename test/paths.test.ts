@@ -96,6 +96,32 @@ test("session jsonl cwd and tool paths follow the destination OS", () => {
   assert.equal(piSessionDirName("C:\\Users\\ada\\work\\app"), "--C--Users-ada-work-app--");
 });
 
+test("a resume model is written at the end of the branch", () => {
+  const jsonl = [
+    JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/home/ada/work/app" }),
+    JSON.stringify({ type: "model_change", id: "m1", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", provider: "anthropic", modelId: "claude-sonnet-5" }),
+    JSON.stringify({ type: "message", id: "a1", parentId: "m1", timestamp: "2026-01-01T00:00:01.000Z", message: { role: "assistant", provider: "anthropic", model: "claude-sonnet-5", content: [] } }),
+  ].join("\n");
+  const result = rewriteSession(
+    jsonl,
+    linux,
+    win,
+    "C:\\Users\\ada\\work\\app",
+    [],
+    { sourceCwd: linux.project },
+    { provider: "vllm", id: "qwen3.8-flash-next" },
+  );
+  const lines = result.jsonl.trim().split("\n").map((line) => JSON.parse(line) as { type: string; id?: string; parentId?: string | null; provider?: string; modelId?: string });
+  const changes = lines.filter((line) => line.type === "model_change");
+  const origin = lines.find((line) => line.type === "custom");
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0]?.provider, "vllm");
+  assert.equal(changes[0]?.modelId, "qwen3.8-flash-next");
+  assert.equal(lines.at(-1)?.type, "model_change");
+  assert.equal(changes[0]?.parentId, origin?.id);
+  assert.equal(lines.find((line) => line.type === "message")?.parentId, null);
+});
+
 test("destination is the projects folder plus the project name", () => {
   assert.equal(defaultDestination("darwin", "/Users/ada/Projects", "app"), "/Users/ada/Projects/app");
   assert.equal(defaultDestination("win32", "D:\\src", "renamed"), "D:\\src\\renamed");
