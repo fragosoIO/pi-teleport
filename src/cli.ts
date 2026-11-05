@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { realpathSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { request } from "node:http";
 import { homedir } from "node:os";
 import { stdin as input, stdout as output } from "node:process";
@@ -191,13 +191,14 @@ async function askService(): Promise<boolean> {
 }
 
 async function installService(root: string, requireCode: boolean): Promise<void> {
+  const started = Date.now();
   const result = await installUserService(homedir());
   console.log(`pi-teleport service installed (${result.unit})`);
   if (!result.linger) {
     console.log("The service runs while you are logged in. To keep it after logout: loginctl enable-linger");
   }
   if (!requireCode) return;
-  const pairingCode = await readCode(root);
+  const pairingCode = await readCode(root, started);
   console.log(pairingCode ? `one-time code: ${pairingCode}` : "run: pi-teleport code");
 }
 
@@ -210,13 +211,16 @@ async function ask(question: string): Promise<string> {
   }
 }
 
-async function readCode(root: string): Promise<string | null> {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+async function readCode(root: string, notBefore: number): Promise<string | null> {
+  const path = join(root, "code");
+  for (let attempt = 0; attempt < 25; attempt += 1) {
     try {
-      return (await readFile(join(root, "code"), "utf8")).trim();
+      const info = await stat(path);
+      if (info.mtimeMs >= notBefore) return (await readFile(path, "utf8")).trim();
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // The listener writes the code after it starts.
     }
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
   return null;
 }

@@ -39,7 +39,10 @@ export async function installUserService(home: string): Promise<{ unit: string; 
   await mkdir(dirname(unit), { recursive: true });
   await writeFile(unit, renderUserUnit(listenerInvocation()));
   await exec("systemctl", ["--user", "daemon-reload"]);
-  await exec("systemctl", ["--user", "enable", "--now", "pi-teleport.service"]);
+  await exec("systemctl", ["--user", "enable", "pi-teleport.service"]);
+  // enable --now leaves an already-running process in place. Restart so the
+  // service loads the current program and the setup answers just saved.
+  await exec("systemctl", ["--user", "restart", "pi-teleport.service"]);
   let linger = true;
   try {
     await exec("loginctl", ["enable-linger", userInfo().username]);

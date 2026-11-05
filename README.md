@@ -49,7 +49,7 @@ pi-teleport setup
 2. `code` to require a one-time code, or `all` to accept any computer that can reach this service.
 3. `y` or `n` to start the service now.
 
-Run setup again to change the answers. The listener reads them on the next connection.
+Run setup again to change the answers. Choosing `y` restarts the service when it is already running, so it loads this program and the answers just saved. A listener that is already the current program reads a later setup on the next connection. A listener still running the previous program does not, until it is restarted.
 
 `pi install` writes the package path into `~/.pi/agent/settings.json`. Restart pi, or run `/reload`, so `/teleport` appears.
 

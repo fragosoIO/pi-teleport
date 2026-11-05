@@ -154,7 +154,9 @@ export default function (pi: ExtensionAPI) {
       try {
         if (!hello.os || !hello.home) throw new Error("the other computer did not announce its home directory");
         const remoteProjects = hello.projects?.trim() ?? "";
-        if (!remoteProjects) throw new Error("the other computer has not run pi-teleport setup");
+        if (!remoteProjects) {
+          throw new Error("the other computer's listener started before pi-teleport setup. On that computer run: systemctl --user restart pi-teleport");
+        }
         const from: PathRoots = { os: currentOs(), home: homedir(), project: ctx.cwd };
         const folderDefault = folderNameOf(ctx.cwd);
         const folder = (await ctx.ui.editor("Destination folder name", folderDefault))?.trim();
