@@ -1,0 +1,28 @@
+{
+  "name": "pi-teleport",
+  "version": "0.1.0",
+  "description": "pi.dev harness plugin that teleports a live session and project to another computer",
+  "type": "module",
+  "bin": {
+    "pi-teleport": "./src/cli.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./src/extension.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "start": "node ./src/cli.ts"
+  },
+  "license": "MIT"
+}
