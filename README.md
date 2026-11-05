@@ -51,21 +51,23 @@ node --test test/*.test.ts
 pi-teleport status
 ```
 
-## Run the listener
+## Run the service
 
-Both computers need a listener before `/teleport`. It prints a one-time code and keeps it until you stop it.
+Both computers run the listener as a user service. A service that is up on the same LAN, Tailscale, or WireGuard network shows up in `/teleport`.
 
 ```bash
-pi-teleport listen
+pi-teleport service install
 ```
 
-Leave that process running (a terminal, tmux, or a user service). The code is also in `~/.pi-teleport/code` (`pi-teleport code`).
+That writes `~/.config/systemd/user/pi-teleport.service`, enables it, and starts it. It also enables lingering so the service stays up when you are logged out. The one-time code is printed at install and kept in `~/.pi-teleport/code` (`pi-teleport code`). A restart of the service mints a new code. Computers that are already paired do not need the new code.
+
+`pi-teleport service status` and `pi-teleport service uninstall` manage it. `pi-teleport listen` still runs the same listener in the foreground.
 
 The listener binds TCP `49721` and a UDP beacon on `49720`. The control API is only on `127.0.0.1:49722`.
 
 ## Pair
 
-On the computer that will **receive**, read the code from `pi-teleport listen`.
+The code is asked once per computer.
 
 On the computer you are coding on, in pi:
 
@@ -73,22 +75,18 @@ On the computer you are coding on, in pi:
 /teleport
 ```
 
-Choose "Enter a one-time code" and type it. Or pass it directly: `/teleport ABCD2345`.
+The list is every pi-teleport service currently visible on this LAN or VPN, plus names you have already paired. Pick the other computer. The first time, type the code from `pi-teleport code` on that computer. The service's name is saved. The next `/teleport` to that name does not ask for a code.
 
-When the send finishes, pi asks for a short name. Accept the other computer's name (or type one). Next time:
+`/teleport ABCD2345` still sends with a code directly. `/teleport laptop` uses a saved name.
 
-```text
-/teleport laptop
-```
-
-`pi-teleport save <name> <public-key>` does the same thing from a shell. `pi-teleport status` prints this computer's public key. The listener also stores the sender's key under the sender's name after a code is used, so the return trip can use `/teleport <that-name>` without a new code.
+`pi-teleport save <name> <public-key>` saves a peer from the shell. `pi-teleport status` prints this computer's public key. The receiving service also stores the sender's key, so the return trip can use `/teleport <that-name>` without a new code.
 
 ## Reachability
 
 The sender tries routes in this order and uses the first one that connects:
 
-1. Same LAN (UDP beacon, then a direct TCP connection).
-2. An existing private network such as Tailscale, if `tailscale` or a `tailscale*` interface is already on this machine. Tailscale is not installed or bundled by this repo.
+1. Same LAN. Listeners advertise on UDP broadcast and on each interface's directed broadcast, then connect with TCP.
+2. An existing VPN. Tailscale peers (`tailscale status`) and WireGuard `/32` peers (`wg show`) are probed with the same UDP beacon. Tailscale and WireGuard are not installed or bundled by this repo. A `tailscale*` interface, when present, is preferred over the relay for those addresses.
 3. The relay, if you configured one.
 
 ## Run the relay
@@ -105,12 +103,12 @@ On **each** computer, once:
 pi-teleport relay-set 10.0.0.2:49730
 ```
 
-Restart `pi-teleport listen` after changing the relay. Both listeners dial out. You do not open inbound ports on the two PCs.
+Restart the service after changing the relay (`systemctl --user restart pi-teleport`). Both listeners dial out. You do not open inbound ports on the two PCs.
 
 ## /teleport on two PCs
 
-1. `pi-teleport listen` on both.
-2. In pi, on the source: `/teleport laptop` (or a one-time code).
+1. `pi-teleport service install` on both.
+2. In pi, on the source: `/teleport`, then the other computer. The code is asked only the first time. After that, `/teleport laptop` connects with the saved name.
 3. Confirm the folder name and path. The default is the project path relative to your home folder, mapped onto the other home folder.
 4. The other listener writes the tree, rewrites the session, and starts `pi --session <file>` in a new terminal when it can find one.
 5. The source session freezes.

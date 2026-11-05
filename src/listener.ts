@@ -9,6 +9,14 @@ import { configRoot, currentOs, loadConfig, loadIdentity, parseHostPort, saveCon
 import { RELAY_PORT } from "./core/constants.ts";
 import { makeCode, type Identity } from "./core/crypto.ts";
 import { localAddresses, type RemotePeer } from "./core/dial.ts";
+import {
+  beaconDestinations,
+  beaconPayload,
+  localBroadcasts,
+  PEER_TTL_MS,
+  preferSource,
+  vpnProbeHosts,
+} from "./core/discover.ts";
 import { launchPi } from "./core/launch.ts";
 import { handshakeListener } from "./core/link.ts";
 import { readLine, writeLine } from "./core/lines.ts";
@@ -27,6 +35,7 @@ export interface ListenerHandle {
   code: string;
   port: number;
   controlPort: number;
+  beaconPort: number;
   close: () => Promise<void>;
 }
 
@@ -125,34 +134,45 @@ export async function startListener(options: { root?: string; home?: string } = 
 
   const beacon = await bindBeacon(config.beaconPort, (message, from) => {
     if (message.pub === identity.publicKey || !message.pub) return;
-    const lan = new Set(message.lan ?? []);
-    const tailscale = new Set(message.ts ?? []);
-    if ((message.ts ?? []).includes(from)) tailscale.add(from);
-    else lan.add(from);
+    const onVpn = (message.ts ?? []).includes(from);
     peers.set(message.pub, {
       name: message.name ?? "pi",
       publicKey: message.pub,
-      port: message.port ?? config.listenPort,
-      code: message.code,
-      lan: [...lan],
-      tailscale: [...tailscale],
+      port: message.port ?? boundPort(tcp),
+      lan: onVpn ? [...(message.lan ?? [])] : preferSource(from, message.lan ?? []),
+      tailscale: onVpn ? preferSource(from, message.ts ?? []) : [...(message.ts ?? [])],
       lastSeen: Date.now(),
     });
   });
-  const beaconTimer = setInterval(() => {
+  const stop = new AbortController();
+  let vpnHosts: string[] = [];
+  let announceCount = 0;
+  const announce = async () => {
+    if (stopped) return;
+    if (announceCount % 8 === 0) vpnHosts = await vpnProbeHosts(stop.signal);
+    announceCount += 1;
+    if (stopped) return;
     const addresses = localAddresses();
-    const payload = Buffer.from(JSON.stringify({
+    const payload = beaconPayload({
       v: 1,
       name: config.name,
       pub: identity.publicKey,
-      port: config.listenPort,
-      code,
+      port: boundPort(tcp),
       lan: addresses.lan,
       ts: addresses.tailscale,
-    }));
+    });
+    const port = boundUdp(beacon);
     beacon.setBroadcast(true);
-    beacon.send(payload, config.beaconPort, "255.255.255.255");
-  }, 2000);
+    for (const host of beaconDestinations(localBroadcasts(), vpnHosts)) {
+      try {
+        beacon.send(payload, port, host, () => undefined);
+      } catch {
+        // The socket can close while an announce is still in flight.
+      }
+    }
+  };
+  void announce();
+  const beaconTimer = setInterval(() => void announce(), 2000);
   beaconTimer.unref?.();
 
   const relayAbort = new AbortController();
@@ -160,7 +180,7 @@ export async function startListener(options: { root?: string; home?: string } = 
 
   console.log(`pi-teleport listener "${config.name}"`);
   console.log(`one-time code: ${code}`);
-  console.log(`port ${config.listenPort}, control 127.0.0.1:${config.controlPort}`);
+  console.log(`port ${boundPort(tcp)}, control 127.0.0.1:${boundPort(control)}`);
   if (config.relay) console.log(`relay ${config.relay}`);
 
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -179,13 +199,19 @@ export async function startListener(options: { root?: string; home?: string } = 
       return;
     }
     if (request.method === "GET" && url.pathname === "/v1/peers") {
-      send(response, 200, [...peers.values()]);
+      const now = Date.now();
+      send(response, 200, [...peers.values()].filter((peer) => now - peer.lastSeen <= PEER_TTL_MS));
       return;
     }
     if (request.method === "POST" && url.pathname === "/v1/pairings") {
       const body = JSON.parse(await readBody(request)) as { name?: string; publicKey?: string };
       if (!body.name || !body.publicKey) {
         send(response, 400, { error: "name and publicKey are required" });
+        return;
+      }
+      const existing = config.pairings[body.name];
+      if (existing && existing.publicKey !== body.publicKey) {
+        send(response, 409, { error: `${body.name} is already paired with a different key` });
         return;
       }
       config.pairings[body.name] = { publicKey: body.publicKey };
@@ -229,9 +255,11 @@ export async function startListener(options: { root?: string; home?: string } = 
     code,
     port: boundPort(tcp),
     controlPort: boundPort(control),
+    beaconPort: boundUdp(beacon),
     close: async () => {
       if (stopped) return;
       stopped = true;
+      stop.abort();
       relayAbort.abort();
       clearInterval(beaconTimer);
       beacon.close();
@@ -267,6 +295,11 @@ function listen(server: Server | ReturnType<typeof createHttp>, port: number, ho
 function boundPort(server: Server | ReturnType<typeof createHttp>): number {
   const address = server.address();
   return address && typeof address === "object" ? address.port : 0;
+}
+
+function boundUdp(socket: UdpSocket): number {
+  const address = socket.address();
+  return typeof address === "object" ? address.port : 0;
 }
 
 function closeServer(server: Server | ReturnType<typeof createHttp>): Promise<void> {

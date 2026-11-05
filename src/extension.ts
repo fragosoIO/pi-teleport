@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { configRoot, currentOs, loadConfig, loadIdentity, type TeleportConfig } from "./core/config.ts";
 import { FREEZE_TYPE } from "./core/constants.ts";
-import { connectToPeer, type RemotePeer } from "./core/dial.ts";
+import { connectToPeer, peerChoiceValue, resolveDial, type RemotePeer } from "./core/dial.ts";
 import { planExternalPlacement } from "./core/external.ts";
 import {
   applyCollisionChoice,
@@ -99,17 +99,32 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify((error as Error).message, "error");
         return;
       }
-      const target = await chooseTarget(arg, config, ctx);
-      if (!target) return;
+      let peers: RemotePeer[] = [];
+      try {
+        peers = await controlJson(config.controlPort, "/v1/peers") as RemotePeer[];
+      } catch {
+        peers = [];
+      }
+      const chosen = await chooseTarget(arg, config, peers, ctx);
+      if (!chosen) return;
+      const target = chosen.target;
+      let dialCode = chosen.code;
+      const first = resolveDial({ target, code: dialCode, pairings: config.pairings, peers });
+      if (first.kind === "need-code") {
+        dialCode = (await ctx.ui.editor(`One-time code from ${first.name}`, ""))?.trim();
+        if (!dialCode) return;
+      } else if (first.kind === "unknown") {
+        ctx.ui.notify(`No pi-teleport service named ${first.target} is visible on this network or VPN.`, "error");
+        return;
+      }
       const identity = await loadIdentity(root);
-      const peers = await controlJson(config.controlPort, "/v1/peers") as RemotePeer[];
-      let link: PeerLink;
-      let hello: { name: string; os?: OsName; home?: string; staticPub: string };
-      let viaCode = false;
-      let publicKey = "";
+      let link: PeerLink | undefined;
+      let hello: { name: string; os?: OsName; home?: string; staticPub: string } | undefined;
+      let dialTarget = target;
       try {
         const connected = await connectToPeer({
           target,
+          code: dialCode,
           config,
           identity,
           peers,
@@ -117,12 +132,20 @@ export default function (pi: ExtensionAPI) {
         });
         link = connected.link;
         hello = connected.hello;
-        viaCode = connected.viaCode;
-        publicKey = connected.publicKey;
+        if (connected.viaCode) {
+          const saved = await rememberPeer(config, hello.name, connected.publicKey, ctx);
+          if (saved) {
+            config.pairings[saved] = { publicKey: connected.publicKey };
+            dialTarget = saved;
+            dialCode = undefined;
+          }
+        }
       } catch (error) {
+        link?.finish();
         ctx.ui.notify((error as Error).message, "error");
         return;
       }
+      if (!link || !hello) return;
       try {
         if (!hello.os || !hello.home) throw new Error("the other computer did not announce its home directory");
         const from: PathRoots = { os: currentOs(), home: homedir(), project: ctx.cwd };
@@ -193,7 +216,14 @@ export default function (pi: ExtensionAPI) {
           files: snapshot.files,
         };
         const result = await sendWithResume(link, plan, async () => {
-          const again = await connectToPeer({ target, config, identity, peers: await controlJson(config.controlPort, "/v1/peers") as RemotePeer[], ourName: config.name });
+          const again = await connectToPeer({
+            target: dialTarget,
+            code: dialCode,
+            config,
+            identity,
+            peers: await controlJson(config.controlPort, "/v1/peers") as RemotePeer[],
+            ourName: config.name,
+          });
           link = again.link;
           return again.link;
         }, (text) => ctx.ui.setStatus("pi-teleport", text));
@@ -205,17 +235,10 @@ export default function (pi: ExtensionAPI) {
         if (result.primaryFallback > 0) {
           ctx.ui.notify(`${result.primaryFallback} files could not be written outside the project. The session uses the copies inside it.`, "warning");
         }
-        if (viaCode) {
-          const saved = (await ctx.ui.editor("Save this computer as a short name", hello.name))?.trim();
-          if (saved) {
-            await postJson(config.controlPort, "/v1/pairings", { name: saved, publicKey });
-            ctx.ui.notify(`Saved as ${saved}. Next time: /teleport ${saved}`, "info");
-          }
-        }
       } catch (error) {
         ctx.ui.notify((error as Error).message, "error");
       } finally {
-        link.finish();
+        link?.finish();
         if (!frozen) ctx.ui.setStatus("pi-teleport", undefined);
       }
     },
@@ -241,22 +264,56 @@ function pairingNames(): string[] {
   }
 }
 
-async function chooseTarget(arg: string, config: TeleportConfig, ctx: ExtensionCommandContext): Promise<string | undefined> {
-  if (arg) return arg;
-  let peers: RemotePeer[] = [];
-  try {
-    peers = await controlJson(config.controlPort, "/v1/peers") as RemotePeer[];
-  } catch {
-    peers = [];
+async function chooseTarget(
+  arg: string,
+  config: TeleportConfig,
+  peers: readonly RemotePeer[],
+  ctx: ExtensionCommandContext,
+): Promise<{ target: string; code?: string } | undefined> {
+  if (arg) return { target: arg };
+  const labels: string[] = [];
+  const seen = new Set<string>();
+  for (const peer of peers) {
+    const saved = Object.entries(config.pairings).find(([, pairing]) => pairing.publicKey === peer.publicKey);
+    const label = saved ? saved[0] : peerChoiceValue(peer, peers);
+    if (seen.has(label)) continue;
+    seen.add(label);
+    labels.push(label);
   }
-  const names = [...new Set([...Object.keys(config.pairings), ...peers.map((peer) => peer.name)])];
-  const choice = await ctx.ui.select("Teleport to", [...names, "Enter a one-time code"]);
+  for (const name of Object.keys(config.pairings)) {
+    if (!seen.has(name)) labels.push(name);
+  }
+  const choice = await ctx.ui.select("Teleport to", [...labels, "Enter a one-time code"]);
   if (!choice) return undefined;
   if (choice === "Enter a one-time code") {
     const code = (await ctx.ui.editor("One-time code from the other computer", ""))?.trim();
-    return code || undefined;
+    return code ? { target: code, code } : undefined;
   }
-  return choice;
+  return { target: choice };
+}
+
+async function rememberPeer(
+  config: TeleportConfig,
+  name: string,
+  publicKey: string,
+  ctx: ExtensionCommandContext,
+): Promise<string | undefined> {
+  const existing = Object.entries(config.pairings).find(([, pairing]) => pairing.publicKey === publicKey);
+  if (existing) return existing[0];
+  let next = name;
+  for (;;) {
+    try {
+      await postJson(config.controlPort, "/v1/pairings", { name: next, publicKey });
+      ctx.ui.notify(`Paired with ${next}. The code is not needed again.`, "info");
+      return next;
+    } catch (error) {
+      const message = (error as Error).message;
+      if (!message.includes("different key")) throw error;
+      const renamed = (await ctx.ui.editor(`${next} is already used. Save this computer as`, `${next}-2`))?.trim();
+      if (!renamed) return undefined;
+      next = renamed;
+    }
+  }
 }
 
 async function sendWithResume(

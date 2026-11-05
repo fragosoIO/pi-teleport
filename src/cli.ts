@@ -10,12 +10,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { configRoot, loadConfig, parseHostPort, saveConfig } from "./core/config.ts";
 import { RELAY_PORT } from "./core/constants.ts";
+import { installUserService, uninstallUserService, userServiceStatus } from "./core/service.ts";
 import { startListener } from "./listener.ts";
 import { startRelay } from "./relay.ts";
 
 const HELP = `pi-teleport
 
-  listen                 run the background listener (prints a one-time code)
+  listen                 run the listener in the foreground (prints a one-time code)
+  service install        run the listener as a user service on this computer
+  service uninstall      stop and remove that service
+  service status         show the user service
   relay [--listen host:port]
                          run the relay on a machine you control
   code                   print the listener's current one-time code
@@ -38,6 +42,29 @@ async function main(argv: string[]): Promise<void> {
     await startListener({ root, home: homedir() });
     await new Promise(() => undefined);
     return;
+  }
+  if (command === "service") {
+    const action = rest[0] ?? "status";
+    if (action === "install") {
+      const result = await installUserService(homedir());
+      console.log(`pi-teleport service installed (${result.unit})`);
+      if (!result.linger) {
+        console.log("The service runs while you are logged in. To keep it after logout: loginctl enable-linger");
+      }
+      const pairingCode = await readCode(root);
+      console.log(pairingCode ? `one-time code: ${pairingCode}` : "run: pi-teleport code");
+      return;
+    }
+    if (action === "uninstall") {
+      await uninstallUserService(homedir());
+      console.log("pi-teleport service removed");
+      return;
+    }
+    if (action === "status") {
+      console.log(await userServiceStatus());
+      return;
+    }
+    throw new Error("usage: pi-teleport service install|uninstall|status");
   }
   if (command === "relay") {
     const spec = rest[0] === "--listen" ? rest[1] : rest[0];
@@ -109,6 +136,17 @@ async function main(argv: string[]): Promise<void> {
     }
   }
   throw new Error(`unknown command ${command}\n\n${HELP}`);
+}
+
+async function readCode(root: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      return (await readFile(join(root, "code"), "utf8")).trim();
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  return null;
 }
 
 function control(port: number, path: string): Promise<unknown> {
