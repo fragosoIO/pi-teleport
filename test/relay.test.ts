@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { connect as connectTcp } from "node:net";
+import { connect as connectTcp, createServer } from "node:net";
 import test from "node:test";
 
 import { createIdentity } from "../src/core/crypto.ts";
 import { dialRelay } from "../src/core/dial.ts";
-import { handshakeListener } from "../src/core/link.ts";
+import { handshakeListener, handshakeSender } from "../src/core/link.ts";
 import { readLine, writeLine } from "../src/core/lines.ts";
 import { startRelay } from "../src/relay.ts";
 
@@ -72,6 +72,59 @@ test("an encrypted handshake still runs after the relay line exchange", async ()
     handshake.link.finish();
   } finally {
     listener.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("accept all completes a handshake with no code and no saved key", async () => {
+  const listenerKey = createIdentity();
+  const senderKey = createIdentity();
+  const server = createServer((socket) => {
+    void handshakeListener(socket, listenerKey, {
+      name: "laptop",
+      os: "linux",
+      home: "/home/ada",
+      projects: "/home/ada/Projects",
+      code: "ABCD2345",
+      requireCode: false,
+    }, () => false).then((accepted) => accepted.link.finish()).catch(() => socket.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("listener did not bind");
+  const socket = connectTcp(address.port, "127.0.0.1");
+  try {
+    await once(socket, "connect");
+    const opened = await handshakeSender(socket, senderKey, { name: "desk" });
+    assert.equal(opened.peer.name, "laptop");
+    opened.link.finish();
+  } finally {
+    socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("a listener that requires a code rejects an unknown sender", async () => {
+  const listenerKey = createIdentity();
+  const senderKey = createIdentity();
+  const server = createServer((socket) => {
+    void handshakeListener(socket, listenerKey, {
+      name: "laptop",
+      os: "linux",
+      home: "/home/ada",
+      code: "ABCD2345",
+      requireCode: true,
+    }, () => false).catch(() => socket.destroy());
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("listener did not bind");
+  const socket = connectTcp(address.port, "127.0.0.1");
+  try {
+    await once(socket, "connect");
+    await assert.rejects(() => handshakeSender(socket, senderKey, { name: "desk" }), /pairing code or saved key required/);
+  } finally {
+    socket.destroy();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

@@ -5,10 +5,12 @@ import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request } from "node:http";
 import { homedir } from "node:os";
+import { stdin as input, stdout as output } from "node:process";
 import { join } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { configRoot, loadConfig, parseHostPort, saveConfig } from "./core/config.ts";
+import { configRoot, configuredProjects, loadConfig, parseHostPort, parsePairingMode, parseYesNo, resolveProjectsDir, saveConfig, SUGGESTED_PROJECTS } from "./core/config.ts";
 import { RELAY_PORT } from "./core/constants.ts";
 import { installUserService, uninstallUserService, userServiceStatus } from "./core/service.ts";
 import { startListener } from "./listener.ts";
@@ -16,6 +18,7 @@ import { startRelay } from "./relay.ts";
 
 const HELP = `pi-teleport
 
+  setup                  choose the projects folder, pairing, and whether to start the service
   listen                 run the listener in the foreground (prints a one-time code)
   service install        run the listener as a user service on this computer
   service uninstall      stop and remove that service
@@ -38,7 +41,27 @@ async function main(argv: string[]): Promise<void> {
     console.log(HELP);
     return;
   }
+  if (command === "setup") {
+    if (rest.length > 0) throw new Error("pi-teleport setup takes no arguments");
+    if (!input.isTTY) throw new Error("pi-teleport setup must be run in a terminal");
+    const config = await loadConfig(root);
+    const dir = await askProjects();
+    const requireCode = await askPairing();
+    const start = await askService();
+    config.projects = dir;
+    config.requireCode = requireCode;
+    await saveConfig(config, root);
+    console.log(`projects folder is ${dir}`);
+    console.log(requireCode ? "a one-time code is required" : "teleports are accepted from any computer");
+    if (!start) {
+      console.log("the service was not started");
+      return;
+    }
+    await installService(root, requireCode);
+    return;
+  }
   if (command === "listen") {
+    configuredProjects(await loadConfig(root));
     await startListener({ root, home: homedir() });
     await new Promise(() => undefined);
     return;
@@ -46,13 +69,9 @@ async function main(argv: string[]): Promise<void> {
   if (command === "service") {
     const action = rest[0] ?? "status";
     if (action === "install") {
-      const result = await installUserService(homedir());
-      console.log(`pi-teleport service installed (${result.unit})`);
-      if (!result.linger) {
-        console.log("The service runs while you are logged in. To keep it after logout: loginctl enable-linger");
-      }
-      const pairingCode = await readCode(root);
-      console.log(pairingCode ? `one-time code: ${pairingCode}` : "run: pi-teleport code");
+      const config = await loadConfig(root);
+      configuredProjects(config);
+      await installService(root, config.requireCode !== false);
       return;
     }
     if (action === "uninstall") {
@@ -136,6 +155,59 @@ async function main(argv: string[]): Promise<void> {
     }
   }
   throw new Error(`unknown command ${command}\n\n${HELP}`);
+}
+
+async function askProjects(): Promise<string> {
+  for (;;) {
+    const given = await ask(`Projects folder [${SUGGESTED_PROJECTS}]: `);
+    try {
+      return await resolveProjectsDir(given || SUGGESTED_PROJECTS);
+    } catch (error) {
+      console.log((error as Error).message);
+    }
+  }
+}
+
+async function askPairing(): Promise<boolean> {
+  for (;;) {
+    const given = await ask("Require a one-time code, or accept all? [code/all]: ");
+    try {
+      return parsePairingMode(given) === "code";
+    } catch (error) {
+      console.log((error as Error).message);
+    }
+  }
+}
+
+async function askService(): Promise<boolean> {
+  for (;;) {
+    const given = await ask("Start the service? [y/n]: ");
+    try {
+      return parseYesNo(given);
+    } catch (error) {
+      console.log((error as Error).message);
+    }
+  }
+}
+
+async function installService(root: string, requireCode: boolean): Promise<void> {
+  const result = await installUserService(homedir());
+  console.log(`pi-teleport service installed (${result.unit})`);
+  if (!result.linger) {
+    console.log("The service runs while you are logged in. To keep it after logout: loginctl enable-linger");
+  }
+  if (!requireCode) return;
+  const pairingCode = await readCode(root);
+  console.log(pairingCode ? `one-time code: ${pairingCode}` : "run: pi-teleport code");
+}
+
+async function ask(question: string): Promise<string> {
+  const rl = createInterface({ input, output });
+  try {
+    return (await rl.question(question)).trim();
+  } finally {
+    rl.close();
+  }
 }
 
 async function readCode(root: string): Promise<string | null> {

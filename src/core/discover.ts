@@ -11,6 +11,8 @@ export interface BeaconBody {
   port: number;
   lan: string[];
   ts: string[];
+  /** Set when this computer accepts teleports without a one-time code. */
+  open?: boolean;
 }
 
 /**

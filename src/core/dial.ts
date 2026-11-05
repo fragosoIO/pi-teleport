@@ -15,6 +15,8 @@ export interface RemotePeer {
   publicKey: string;
   port: number;
   code?: string;
+  /** The service accepts a first connection without a one-time code. */
+  acceptAll?: boolean;
   lan: string[];
   tailscale: string[];
   lastSeen: number;
@@ -84,6 +86,7 @@ export function peerChoiceValue(peer: RemotePeer, peers: readonly RemotePeer[]):
 
 export type DialResolution =
   | { kind: "paired"; publicKey: string; peer: RemotePeer | null; relayName: string }
+  | { kind: "open"; peers: RemotePeer[] }
   | { kind: "introduce"; code: string; peers: RemotePeer[] }
   | { kind: "need-code"; name: string }
   | { kind: "unknown"; target: string };
@@ -118,6 +121,7 @@ export function resolveDial(options: {
         return { kind: "paired", publicKey: named[0]!.publicKey, peer: named[0]!, relayName: existing[0] };
       }
     }
+    if (named.every((peer) => peer.acceptAll)) return { kind: "open", peers: named };
     const code = options.code?.trim();
     if (!code) {
       const name = named.length === 1 ? peerChoiceValue(named[0]!, options.peers) : target;
@@ -180,6 +184,26 @@ export async function connectToPeer(options: {
       throw new Error(`${resolution.relayName} is paired, but its pi-teleport service is ${state} on this network or VPN.`);
     }
     return opened;
+  }
+  if (resolution.kind === "open") {
+    let other: Error | undefined;
+    for (const peer of resolution.peers) {
+      try {
+        const opened = await openPeer({
+          peer,
+          viaCode: false,
+          expectPub: peer.publicKey,
+          relayRoute: { name: peer.name },
+          config: options.config,
+          identity: options.identity,
+          ourName: options.ourName,
+        });
+        if (opened) return opened;
+      } catch (error) {
+        other = error as Error;
+      }
+    }
+    throw other ?? new Error("That pi-teleport service is not reachable on this network or VPN.");
   }
 
   let mismatch: Error | undefined;

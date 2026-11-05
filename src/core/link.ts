@@ -13,6 +13,8 @@ export interface Hello {
   ephPub: string;
   os?: OsName;
   home?: string;
+  /** Absolute folder that receives projects on the listener. */
+  projects?: string;
   code?: string;
 }
 
@@ -132,7 +134,7 @@ export async function handshakeSender(
 export async function handshakeListener(
   socket: Socket,
   identity: Identity,
-  info: { name: string; os: OsName; home: string; code: string },
+  info: { name: string; os: OsName; home: string; projects?: string; code: string; requireCode?: boolean },
   knownKey: (publicKey: string) => boolean,
 ): Promise<HandshakeResult> {
   const link = new PeerLink(socket);
@@ -146,7 +148,8 @@ export async function handshakeListener(
     throw new Error("rejected sender");
   }
   const viaCode = presented.length > 0 && presented === info.code;
-  if (!viaCode && !knownKey(peer.staticPub)) {
+  const requireCode = info.requireCode !== false;
+  if (!viaCode && !knownKey(peer.staticPub) && requireCode) {
     link.sendJson({ t: "reject", reason: "pairing code or saved key required" });
     link.close();
     throw new Error("rejected sender");
@@ -160,6 +163,7 @@ export async function handshakeListener(
     ephPub: eph.publicKey,
     os: info.os,
     home: info.home,
+    projects: info.projects || undefined,
   });
   // Mix the code only when the sender presented the current one. A saved pairing uses "".
   const mixed = viaCode ? presented : "";

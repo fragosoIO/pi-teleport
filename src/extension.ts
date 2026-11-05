@@ -5,7 +5,7 @@ import { request } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { configRoot, currentOs, loadConfig, loadIdentity, type TeleportConfig } from "./core/config.ts";
+import { configRoot, currentOs, loadConfig, loadIdentity, SETUP_HINT, setupComplete, type TeleportConfig } from "./core/config.ts";
 import { FREEZE_TYPE } from "./core/constants.ts";
 import { connectToPeer, peerChoiceValue, resolveDial, type RemotePeer } from "./core/dial.ts";
 import { planExternalPlacement } from "./core/external.ts";
@@ -93,6 +93,10 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify((error as Error).message, "error");
         return;
       }
+      if (!setupComplete(config)) {
+        ctx.ui.notify(SETUP_HINT, "error");
+        return;
+      }
       try {
         await controlJson(config.controlPort, "/v1/status");
       } catch (error) {
@@ -119,7 +123,7 @@ export default function (pi: ExtensionAPI) {
       }
       const identity = await loadIdentity(root);
       let link: PeerLink | undefined;
-      let hello: { name: string; os?: OsName; home?: string; staticPub: string } | undefined;
+      let hello: { name: string; os?: OsName; home?: string; projects?: string; staticPub: string } | undefined;
       let dialTarget = target;
       try {
         const connected = await connectToPeer({
@@ -132,8 +136,9 @@ export default function (pi: ExtensionAPI) {
         });
         link = connected.link;
         hello = connected.hello;
-        if (connected.viaCode) {
-          const saved = await rememberPeer(config, hello.name, connected.publicKey, ctx);
+        const known = Object.values(config.pairings).some((item) => item.publicKey === connected.publicKey);
+        if (!known) {
+          const saved = await rememberPeer(config, hello.name, connected.publicKey, ctx, connected.viaCode);
           if (saved) {
             config.pairings[saved] = { publicKey: connected.publicKey };
             dialTarget = saved;
@@ -148,11 +153,13 @@ export default function (pi: ExtensionAPI) {
       if (!link || !hello) return;
       try {
         if (!hello.os || !hello.home) throw new Error("the other computer did not announce its home directory");
+        const remoteProjects = hello.projects?.trim() ?? "";
+        if (!remoteProjects) throw new Error("the other computer has not run pi-teleport setup");
         const from: PathRoots = { os: currentOs(), home: homedir(), project: ctx.cwd };
         const folderDefault = folderNameOf(ctx.cwd);
         const folder = (await ctx.ui.editor("Destination folder name", folderDefault))?.trim();
         if (!folder) return;
-        let dest = (await ctx.ui.editor("Destination path", defaultDestination(from, { ...from, os: hello.os, home: hello.home }, folder)))?.trim();
+        let dest = (await ctx.ui.editor("Destination path", defaultDestination(hello.os, remoteProjects, folder)))?.trim();
         if (!dest) return;
         const entries = JSON.parse(JSON.stringify(ctx.sessionManager.getEntries())) as JsonRecord[];
         const external = await listExternalFiles(entries, ctx.cwd, from.home, from.os, ctx.sessionManager.getSessionFile() ?? undefined);
@@ -174,7 +181,7 @@ export default function (pi: ExtensionAPI) {
             if (action.action === "rename") {
               const nextName = (await ctx.ui.editor("Destination folder name", `${folder}-2`))?.trim();
               if (!nextName) return;
-              const nextPath = (await ctx.ui.editor("Destination path", defaultDestination(from, to, nextName)))?.trim();
+              const nextPath = (await ctx.ui.editor("Destination path", defaultDestination(hello.os, remoteProjects, nextName)))?.trim();
               if (!nextPath) return;
               dest = nextPath;
               continue;
@@ -297,6 +304,7 @@ async function rememberPeer(
   name: string,
   publicKey: string,
   ctx: ExtensionCommandContext,
+  usedCode: boolean,
 ): Promise<string | undefined> {
   const existing = Object.entries(config.pairings).find(([, pairing]) => pairing.publicKey === publicKey);
   if (existing) return existing[0];
@@ -304,7 +312,8 @@ async function rememberPeer(
   for (;;) {
     try {
       await postJson(config.controlPort, "/v1/pairings", { name: next, publicKey });
-      ctx.ui.notify(`Paired with ${next}. The code is not needed again.`, "info");
+      const note = usedCode ? " The code is not needed again." : "";
+      ctx.ui.notify(`Paired with ${next}.${note}`, "info");
       return next;
     } catch (error) {
       const message = (error as Error).message;

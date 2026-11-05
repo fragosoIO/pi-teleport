@@ -15,6 +15,8 @@ test("the listener answers on localhost and shows a one-time code", async () => 
     listenPort: 0,
     beaconPort: 0,
     controlPort: 0,
+    projects: root,
+    requireCode: true,
     pairings: {},
   }));
   const listener = await startListener({ root, home: root });
@@ -24,6 +26,7 @@ test("the listener answers on localhost and shows a one-time code", async () => 
     assert.equal(status.name, "laptop");
     assert.equal(status.code, listener.code);
     assert.equal(typeof status.publicKey, "string");
+    assert.equal(status.projects, root);
   } finally {
     await listener.close();
     await rm(root, { recursive: true, force: true });
@@ -37,6 +40,8 @@ test("a service beacon is visible without a one-time code", async () => {
     listenPort: 0,
     beaconPort: 0,
     controlPort: 0,
+    projects: root,
+    requireCode: true,
     pairings: {},
   }));
   const listener = await startListener({ root, home: root });
@@ -67,7 +72,58 @@ test("a service beacon is visible without a one-time code", async () => {
   }
 });
 
-function getJson(port: number, path: string): Promise<{ name: string; code: string; publicKey: string }> {
+test("the listener refuses to start before setup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-teleport-unset-"));
+  await writeFile(join(root, "config.json"), JSON.stringify({
+    name: "laptop",
+    listenPort: 0,
+    beaconPort: 0,
+    controlPort: 0,
+    pairings: {},
+  }));
+  try {
+    await assert.rejects(() => startListener({ root, home: root }), /pi-teleport setup/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("status reports the projects folder after it changes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-teleport-projects-"));
+  const projects = join(root, "projects");
+  await writeFile(join(root, "config.json"), JSON.stringify({
+    name: "laptop",
+    listenPort: 0,
+    beaconPort: 0,
+    controlPort: 0,
+    projects,
+    requireCode: true,
+    pairings: {},
+  }));
+  const listener = await startListener({ root, home: root });
+  try {
+    const status = await getJson(listener.controlPort, "/v1/status");
+    assert.equal(status.projects, projects);
+    const moved = join(root, "moved");
+    await writeFile(join(root, "config.json"), JSON.stringify({
+      name: "laptop",
+      listenPort: 0,
+      beaconPort: 0,
+      controlPort: 0,
+      projects: moved,
+      requireCode: false,
+      pairings: {},
+    }));
+    const next = await getJson(listener.controlPort, "/v1/status");
+    assert.equal(next.projects, moved);
+    assert.equal(next.requireCode, false);
+  } finally {
+    await listener.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function getJson(port: number, path: string): Promise<{ name: string; code: string; publicKey: string; projects: string | null; requireCode: boolean | null }> {
   return new Promise((resolve, reject) => {
     const req = request({ hostname: "127.0.0.1", port, path }, (res) => {
       const chunks: Buffer[] = [];

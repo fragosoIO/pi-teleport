@@ -190,15 +190,13 @@ export function rewriteText(
   return out;
 }
 
-/** Sensible destination: the project path relative to home, mapped onto the target home. */
-export function defaultDestination(from: PathRoots, to: PathRoots, folderName: string): string {
-  const safeName = folderName.replace(/[\\/]/g, "") || "project";
-  const rel = relativeInside(from.home, from.project, from.os);
-  if (rel === null) return joinOs(to.os, to.home, `teleport/${safeName}`);
-  const parts = rel.split("/").filter((part) => part.length > 0);
-  if (parts.length === 0) return joinOs(to.os, to.home, safeName);
-  parts[parts.length - 1] = safeName;
-  return joinOs(to.os, to.home, parts.join("/"));
+/** Destination folder: the projects folder from setup, plus the project name. */
+export function defaultDestination(os: OsName, projects: string, folderName: string): string {
+  const root = projects.trim();
+  if (!root) throw new Error("run pi-teleport setup before using teleport");
+  const safeName = folderName.replace(/[\\/]/g, "").trim();
+  if (!safeName) throw new Error("a destination folder name is required");
+  return joinOs(os, root, safeName);
 }
 
 export function folderNameOf(project: string): string {

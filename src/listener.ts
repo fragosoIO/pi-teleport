@@ -5,7 +5,7 @@ import { createServer as createTcp, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { configRoot, currentOs, loadConfig, loadIdentity, parseHostPort, saveConfig, type TeleportConfig } from "./core/config.ts";
+import { configRoot, configuredProjects, currentOs, loadConfig, loadIdentity, parseHostPort, saveConfig, type TeleportConfig } from "./core/config.ts";
 import { RELAY_PORT } from "./core/constants.ts";
 import { makeCode, type Identity } from "./core/crypto.ts";
 import { localAddresses, type RemotePeer } from "./core/dial.ts";
@@ -45,6 +45,7 @@ export async function startListener(options: { root?: string; home?: string } = 
   await mkdir(root, { recursive: true });
   const identity = await loadIdentity(root);
   let config = await loadConfig(root);
+  configuredProjects(config);
   const code = makeCode();
   await writeFile(join(root, "code"), `${code}\n`, { mode: 0o600 });
   await chmod(join(root, "code"), 0o600).catch(() => undefined);
@@ -57,13 +58,16 @@ export async function startListener(options: { root?: string; home?: string } = 
 
   async function serve(socket: Socket): Promise<void> {
     config = await loadConfig(root);
+    const projects = configuredProjects(config);
     const accepted = await handshakeListener(socket, identity, {
       name: config.name,
       os: currentOs(),
       home,
+      projects,
       code,
+      requireCode: config.requireCode,
     }, known);
-    if (accepted.code) await rememberSender(accepted.peer.name, accepted.peer.staticPub);
+    await rememberSender(accepted.peer.name, accepted.peer.staticPub);
     await receiveSession(accepted.link, {
       stateRoot: join(root, "incoming"),
       sessionsRoot: process.env.PI_CODING_AGENT_DIR
@@ -99,14 +103,14 @@ export async function startListener(options: { root?: string; home?: string } = 
       if (name && !config.pairings[name]) {
         config.pairings[name] = { publicKey };
         await saveConfig(config, root);
-        console.log(`saved ${name} after one-time code`);
+        console.log(`saved ${name}`);
       }
       return;
     }
     if (!config.pairings[name]) {
       config.pairings[name] = { publicKey };
       await saveConfig(config, root);
-      console.log(`saved ${name} after one-time code`);
+      console.log(`saved ${name}`);
       return;
     }
     console.log(`one-time sender ${name} has a different key than the saved pairing; left the saved key in place`);
@@ -139,6 +143,7 @@ export async function startListener(options: { root?: string; home?: string } = 
       name: message.name ?? "pi",
       publicKey: message.pub,
       port: message.port ?? boundPort(tcp),
+      acceptAll: message.open === true,
       lan: onVpn ? [...(message.lan ?? [])] : preferSource(from, message.lan ?? []),
       tailscale: onVpn ? preferSource(from, message.ts ?? []) : [...(message.ts ?? [])],
       lastSeen: Date.now(),
@@ -149,6 +154,7 @@ export async function startListener(options: { root?: string; home?: string } = 
   let announceCount = 0;
   const announce = async () => {
     if (stopped) return;
+    config = await loadConfig(root);
     if (announceCount % 8 === 0) vpnHosts = await vpnProbeHosts(stop.signal);
     announceCount += 1;
     if (stopped) return;
@@ -160,6 +166,7 @@ export async function startListener(options: { root?: string; home?: string } = 
       port: boundPort(tcp),
       lan: addresses.lan,
       ts: addresses.tailscale,
+      ...(config.requireCode === false ? { open: true } : {}),
     });
     const port = boundUdp(beacon);
     beacon.setBroadcast(true);
@@ -179,19 +186,23 @@ export async function startListener(options: { root?: string; home?: string } = 
   if (config.relay) void relayLoop(config, identity, code, relayAbort.signal, serve);
 
   console.log(`pi-teleport listener "${config.name}"`);
-  console.log(`one-time code: ${code}`);
+  console.log(config.requireCode === false ? "accepting teleports from any computer" : `one-time code: ${code}`);
   console.log(`port ${boundPort(tcp)}, control 127.0.0.1:${boundPort(control)}`);
+  if (config.projects) console.log(`projects ${config.projects}`);
   if (config.relay) console.log(`relay ${config.relay}`);
 
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     if (request.method === "GET" && url.pathname === "/v1/status") {
+      config = await loadConfig(root);
       send(response, 200, {
         name: config.name,
         code,
         publicKey: identity.publicKey,
         os: currentOs(),
         home,
+        projects: config.projects ?? null,
+        requireCode: config.requireCode ?? null,
         relay: config.relay ?? null,
         listenPort: config.listenPort,
         pairings: Object.keys(config.pairings),
@@ -312,6 +323,7 @@ interface Beacon {
   pub?: string;
   port?: number;
   code?: string;
+  open?: boolean;
   lan?: string[];
   ts?: string[];
 }

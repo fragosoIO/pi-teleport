@@ -1,6 +1,6 @@
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { join, parse, resolve } from "node:path";
 
 import { BEACON_PORT, CONTROL_PORT, LAN_PORT } from "./constants.ts";
 import { createIdentity, type Identity } from "./crypto.ts";
@@ -16,6 +16,10 @@ export interface TeleportConfig {
   beaconPort: number;
   controlPort: number;
   relay?: string;
+  /** Absolute folder that receives teleported projects on this computer. */
+  projects?: string;
+  /** When false, any reachable computer may teleport here without a one-time code. */
+  requireCode?: boolean;
   pairings: Record<string, Pairing>;
 }
 
@@ -23,9 +27,44 @@ export function configRoot(home = homedir()): string {
   return join(home, ".pi-teleport");
 }
 
+/** Shown in setup. Enter accepts it, and the folder is created if it is missing. */
+export const SUGGESTED_PROJECTS = "~/.pi-teleport/projects";
+
+export function defaultProjectsDir(home = homedir()): string {
+  return join(configRoot(home), "projects");
+}
+
 export function currentOs(): OsName {
   if (process.platform === "win32" || process.platform === "darwin" || process.platform === "linux") return process.platform;
   return "linux";
+}
+
+export const SETUP_HINT = "run pi-teleport setup before using teleport";
+
+/** True after setup has chosen a projects folder and a pairing rule. */
+export function setupComplete(config: TeleportConfig): boolean {
+  return Boolean(config.projects?.trim()) && typeof config.requireCode === "boolean";
+}
+
+/** The projects folder chosen by `pi-teleport setup`, or an error when setup has not been run. */
+export function configuredProjects(config: TeleportConfig): string {
+  if (!setupComplete(config)) throw new Error(SETUP_HINT);
+  return config.projects!.trim();
+}
+
+/** `code` requires a one-time code. `all` accepts any computer that can reach this service. */
+export function parsePairingMode(input: string): "code" | "all" {
+  const value = input.trim().toLowerCase();
+  if (value === "code" || value === "one-time" || value === "onetime") return "code";
+  if (value === "all" || value === "accept" || value === "accept all") return "all";
+  throw new Error("answer code or all");
+}
+
+export function parseYesNo(input: string): boolean {
+  const value = input.trim().toLowerCase();
+  if (value === "y" || value === "yes") return true;
+  if (value === "n" || value === "no") return false;
+  throw new Error("answer y or n");
 }
 
 export function defaultName(): string {
@@ -71,6 +110,40 @@ export async function loadIdentity(root = configRoot()): Promise<Identity> {
     await chmod(path, 0o600).catch(() => undefined);
     return identity;
   }
+}
+
+/** Expand `~` and resolve to an absolute folder. A drive root is refused. */
+export function normalizeProjectsDir(input: string, home = homedir()): string {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error("a projects folder is required");
+  let expanded = trimmed;
+  if (expanded === "~") expanded = home;
+  else if (expanded.startsWith("~/") || expanded.startsWith("~\\")) expanded = join(home, expanded.slice(2));
+  const absolute = resolve(expanded);
+  if (absolute === parse(absolute).root) throw new Error("projects folder cannot be a drive root");
+  return absolute;
+}
+
+/**
+ * Resolve a projects folder.
+ * The suggested default is created when it is missing. Any other path must already be a folder.
+ */
+export async function resolveProjectsDir(input: string, home = homedir()): Promise<string> {
+  const dir = normalizeProjectsDir(input, home);
+  try {
+    const info = await stat(dir);
+    if (!info.isDirectory()) throw new Error(`not a folder: ${dir}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (dir === defaultProjectsDir(home)) {
+        await mkdir(dir, { recursive: true });
+        return dir;
+      }
+      throw new Error(`no such folder: ${dir}`);
+    }
+    throw error;
+  }
+  return dir;
 }
 
 export function parseHostPort(value: string, fallbackPort: number): { host: string; port: number } {

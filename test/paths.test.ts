@@ -96,11 +96,13 @@ test("session jsonl cwd and tool paths follow the destination OS", () => {
   assert.equal(piSessionDirName("C:\\Users\\ada\\work\\app"), "--C--Users-ada-work-app--");
 });
 
-test("default destination keeps the path relative to home", () => {
-  assert.equal(defaultDestination(linux, mac, "app"), "/Users/ada/work/app");
-  assert.equal(defaultDestination(linux, win, "renamed"), "C:\\Users\\ada\\work\\renamed");
-  assert.equal(
-    defaultDestination({ os: "linux", home: "/home/ada", project: "/opt/app" }, mac, "app"),
-    "/Users/ada/teleport/app",
-  );
+test("destination is the projects folder plus the project name", () => {
+  assert.equal(defaultDestination("darwin", "/Users/ada/Projects", "app"), "/Users/ada/Projects/app");
+  assert.equal(defaultDestination("win32", "D:\\src", "renamed"), "D:\\src\\renamed");
+  assert.equal(defaultDestination("darwin", "/Users/ada/Projects", "nested/name"), "/Users/ada/Projects/nestedname");
+});
+
+test("destination requires the projects folder from setup", () => {
+  assert.throws(() => defaultDestination("linux", "  ", "app"), /pi-teleport setup/);
+  assert.throws(() => defaultDestination("linux", "/Users/ada/Projects", " / "), /folder name is required/);
 });

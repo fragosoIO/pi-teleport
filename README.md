@@ -14,7 +14,7 @@ The transfer is encrypted on every path (X25519, then AES-256-GCM). A relay only
 
 Each outside file is written in both places when the target allows it: the same path relative to the home folder (or the same absolute path), and a spare copy inside the project at `.pi-teleport/external/`. The restored session keeps using the home or absolute path. If that write cannot be done, references in the session are rewritten to the spare copy.
 
-You are asked only when a write would replace something that is already on the target: overwrite those files, skip those files, or cancel. Every send also asks for the destination folder name and path, with a default filled in. If that folder exists: overwrite, pick a new name, or cancel.
+You are asked only when a write would replace something that is already on the target: overwrite those files, skip those files, or cancel. Every send also asks for the destination folder name and path. The path is the other computer's projects folder plus the project name. If that folder exists: overwrite, pick a new name, or cancel.
 
 Symlinks are kept as symlinks. If that operating system cannot create one, that file fails in the open and the rest of the transfer continues.
 
@@ -40,7 +40,16 @@ ln -sfn "$PWD/src/cli.ts" ~/.local/bin/pi-teleport
 
 pi install "$PWD"
 pi-teleport name laptop          # a short name for this computer
+pi-teleport setup
 ```
+
+`pi-teleport setup` is required on each computer before `/teleport` or the listener will run. It asks three questions:
+
+1. The projects folder. Press Enter for `~/.pi-teleport/projects`. That folder is created if it is missing. Any other path must already exist.
+2. `code` to require a one-time code, or `all` to accept any computer that can reach this service.
+3. `y` or `n` to start the service now.
+
+Run setup again to change the answers. The listener reads them on the next connection.
 
 `pi install` writes the package path into `~/.pi/agent/settings.json`. Restart pi, or run `/reload`, so `/teleport` appears.
 
@@ -59,7 +68,7 @@ Both computers run the listener as a user service. A service that is up on the s
 pi-teleport service install
 ```
 
-That writes `~/.config/systemd/user/pi-teleport.service`, enables it, and starts it. It also enables lingering so the service stays up when you are logged out. The one-time code is printed at install and kept in `~/.pi-teleport/code` (`pi-teleport code`). A restart of the service mints a new code. Computers that are already paired do not need the new code.
+That writes `~/.config/systemd/user/pi-teleport.service`, enables it, and starts it. It also enables lingering so the service stays up when you are logged out. When a one-time code is required, it is printed at install and kept in `~/.pi-teleport/code` (`pi-teleport code`). A restart of the service mints a new code. Computers that are already paired do not need the new code. A computer set to accept all does not ask for a code.
 
 `pi-teleport service status` and `pi-teleport service uninstall` manage it. `pi-teleport listen` still runs the same listener in the foreground.
 
@@ -75,7 +84,7 @@ On the computer you are coding on, in pi:
 /teleport
 ```
 
-The list is every pi-teleport service currently visible on this LAN or VPN, plus names you have already paired. Pick the other computer. The first time, type the code from `pi-teleport code` on that computer. The service's name is saved. The next `/teleport` to that name does not ask for a code.
+The list is every pi-teleport service currently visible on this LAN or VPN, plus names you have already paired. Pick the other computer. The first time, type the code from `pi-teleport code` on that computer, unless that computer was set up to accept all. The service's name is saved. The next `/teleport` to that name does not ask for a code.
 
 `/teleport ABCD2345` still sends with a code directly. `/teleport laptop` uses a saved name.
 
@@ -107,9 +116,9 @@ Restart the service after changing the relay (`systemctl --user restart pi-telep
 
 ## /teleport on two PCs
 
-1. `pi-teleport service install` on both.
+1. `pi-teleport setup` on both, and start the service when it asks.
 2. In pi, on the source: `/teleport`, then the other computer. The code is asked only the first time. After that, `/teleport laptop` connects with the saved name.
-3. Confirm the folder name and path. The default is the project path relative to your home folder, mapped onto the other home folder.
+3. Confirm the folder name and path. The path is that computer's projects folder plus the project name.
 4. The other listener writes the tree, rewrites the session, and starts `pi --session <file>` in a new terminal when it can find one.
 5. The source session freezes.
 

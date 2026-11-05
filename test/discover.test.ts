@@ -43,6 +43,20 @@ test("directed broadcasts skip single-host VPN addresses", () => {
   assert.equal(ipv4Broadcast("100.64.1.2", "255.255.255.255"), null);
 });
 
+test("an accept-all beacon says so and still omits the one-time code", () => {
+  const body = JSON.parse(beaconPayload({
+    v: 1,
+    name: "laptop",
+    pub: "pub",
+    port: 49721,
+    lan: ["192.168.1.9"],
+    ts: [],
+    open: true,
+  }).toString("utf8")) as Record<string, unknown>;
+  assert.equal(body.open, true);
+  assert.equal("code" in body, false);
+});
+
 test("a visible service needs the code once, and a saved name does not", () => {
   const desktop = peer("desktop", "desktop-key");
   assert.equal(resolveDial({ target: "desktop", pairings: {}, peers: [desktop] }).kind, "need-code");
@@ -56,6 +70,9 @@ test("a visible service needs the code once, and a saved name does not", () => {
   assert.equal(typed.kind, "introduce");
   if (typed.kind === "introduce") assert.equal(typed.code, "ABCD2345");
   assert.equal(resolveDial({ target: "missing", pairings: {}, peers: [] }).kind, "unknown");
+  const open = peer("desktop", "desktop-key");
+  open.acceptAll = true;
+  assert.equal(resolveDial({ target: "desktop", pairings: {}, peers: [open] }).kind, "open");
 });
 
 test("two services with the same name stay distinct in the menu", () => {
